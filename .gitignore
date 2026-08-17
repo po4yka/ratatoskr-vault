@@ -1,1 +1,29 @@
-# Repository-specific ignore rules will be added with implementation scaffolding.
+# Rust / Cargo build output
+target/
+*.rs.bk
+
+# Test and coverage output
+*.profraw
+*.profdata
+/coverage/
+
+# Local vault storage (bare mirrors, Git bundles); tracked fixtures stay tracked
+/mirrors/
+*.bundle
+!fixtures/**/*.bundle
+
+# Local environment and credentials (Git, LFS, S3-compatible storage)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/secrets/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
