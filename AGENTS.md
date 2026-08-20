@@ -26,6 +26,23 @@ When creating initial implementation:
 - make verification and restore first-class states;
 - avoid coupling Vault to GitHub star/list models.
 
+### Development status
+
+Ratatoskr is in development. No database holds data that has to survive a schema change. While this
+status holds, these rules are binding, and they override anything else in this repository that
+plans otherwise, including the rest of this file:
+
+- **One version only.** The API, the database, and the contracts keep their first version. Do not
+  add a `v2` or a later major version, and do not add version negotiation, deprecation windows, or
+  parallel-major routing.
+- **No database migrations.** Do not add a migration file, and do not add migration tooling. A
+  schema change edits the current schema definition in place, and a test database is created from
+  that definition.
+- **The product is `Ratatoskr`.** It is not "Ratatoskr Next". Do not write that name in code,
+  documentation, identifiers, comments, or commit messages.
+
+Only the repository owner changes this status. Ask before you write anything these rules forbid.
+
 ## Sources of truth
 
 Use this order:

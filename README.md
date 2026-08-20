@@ -1,10 +1,21 @@
 # Ratatoskr Vault
 
-`ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr Next. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
+`ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
 > **Status:** architecture bootstrap. No mirror worker, storage schema, Git command runner, snapshot format, or restore verifier is implemented yet.
 
-## Role in Ratatoskr Next
+> [!IMPORTANT]
+> **Ratatoskr is in development.** No database holds data that has to survive a schema change.
+> While this status holds, these two rules replace what the documents below plan:
+>
+> - the API and the database keep their first version. There is no `v2` and no later major
+>   version.
+> - the database has no migrations. One schema definition exists, and a schema change edits it in
+>   place.
+>
+> Only the repository owner changes this status.
+
+## Role in Ratatoskr
 
 GitHub Catalog decides **what should be preserved**. Git Vault proves **what has actually been preserved and can be restored**.
 
