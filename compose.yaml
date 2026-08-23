@@ -1,0 +1,37 @@
+# Local dependencies for developing Ratatoskr Vault.
+#
+# `docker compose up -d` then `cargo test` works with no further setup: the database URL below is
+# byte-identical to the default in `crates/persistence/src/test_support.rs` and to
+# `VAULT_TEST_DATABASE_URL` in `.github/workflows/ci.yml`, so all three places that must agree are
+# one string copied three times.
+#
+# If another Ratatoskr repository's postgres already occupies 5432 on this machine, either stop it
+# first or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`.
+services:
+  postgres:
+    # Pinned by digest, not by tag: this container builds the artifacts the gate verifies, so a
+    # moving tag would be a moving foundation. Digest of `postgres:17` as of 2026-08-22,
+    # byte-identical to ratatoskr-platform/compose.yaml so one pull serves every repository.
+    image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+    container_name: ratatoskr-vault-postgres
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: vault
+      POSTGRES_DB: vault
+      # Byte-identical to ci.yml. Without it this cluster is created with the runner's glibc
+      # collation while a developer's is created with ICU, so a text index sorts differently in the
+      # two places that are supposed to be checking each other. Test databases copy template0 with
+      # the same locale stated again, so every database in the fleet sorts identically.
+      POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=und-x-icu --encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault -d vault"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  postgres-data:

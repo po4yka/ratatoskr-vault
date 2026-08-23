@@ -1,0 +1,93 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/telemetry",
+    "crates/persistence",
+    "crates/http",
+    "services/vault",
+]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.97"                       # equals the pinned toolchain; no MSRV promise we cannot check
+license      = "BSD-3-Clause"
+repository   = "https://github.com/po4yka/ratatoskr-vault"
+
+[workspace.dependencies]
+# ---- in-repo ----
+ratatoskr-vault-core        = { version = "0.1.0", path = "crates/core" }
+ratatoskr-vault-telemetry   = { version = "0.1.0", path = "crates/telemetry" }
+ratatoskr-vault-persistence = { version = "0.1.0", path = "crates/persistence" }
+ratatoskr-vault-http        = { version = "0.1.0", path = "crates/http" }
+
+# ---- persistence ----
+# No `migrate` feature: the schema is one file, `include_str!`d into the binary by
+# `ratatoskr-vault-persistence`, so a deployment cannot drift from its schema and there is no
+# ledger to record (DEVELOPMENT status: no migrations; a schema change edits `schema.sql` in place).
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "runtime-tokio", "tls-rustls-ring", "postgres", "uuid",
+] }
+
+# ---- async runtime and HTTP ----
+tokio      = { version = "1.46", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+axum       = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+http       = "1.3"
+
+# ---- configuration ----
+figment = { version = "0.10", features = ["env"] }
+secrecy = { version = "0.10", features = ["serde"] }
+url     = { version = "2.5", features = ["serde"] }
+
+# ---- telemetry ----
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry", "env-filter", "fmt", "json", "ansi"] }
+tracing-opentelemetry = "0.33"
+opentelemetry      = "0.32"
+opentelemetry_sdk  = { version = "0.32", features = ["rt-tokio", "trace"] }
+# The three `tls-*` features are load-bearing, not defensive: without a TLS feature the exporter
+# REFUSES to build for an `https://` endpoint, so a deployment pointed at a TLS collector would
+# exit 1 at startup while `.env.example` advertises the scheme.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace", "tls-ring", "tls-roots", "tls-webpki-roots"] }
+metrics                        = "0.24"
+metrics-exporter-prometheus    = { version = "0.17", default-features = false }
+
+# ---- identifiers ----
+# v7 for internally minted identity; the database stores the same bytes.
+uuid = { version = "1.11", features = ["v7", "serde"] }
+
+# ---- serialization and errors ----
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror  = "2.0"
+
+# ---- dev only ----
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[workspace.lints.rust]
+unsafe_code                   = "forbid"
+missing_docs                  = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub               = "deny"
+
+[workspace.lints.clippy]
+pedantic           = { level = "warn", priority = -1 }
+unwrap_used        = "deny"
+expect_used        = "deny"
+panic              = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+dbg_macro          = "deny"
+todo               = "deny"
+print_stdout       = "deny"     # startup failures go to stderr; a stray println bypasses the subscriber
+# `panic`, `unwrap_used` and `expect_used` close every EXPLICIT panic path and leave the most
+# common implicit one open. Both are `allow` by default and in `clippy::restriction`, so
+# `pedantic` does not enable them.
+indexing_slicing   = "deny"     # `v[i]` and `&s[a..b]` panicking out of bounds
+string_slice       = "deny"     # `&s[..n]` panicking because n is not a UTF-8 char boundary
+
+# Release profile: `panic` is left at the default `unwind` ON PURPOSE, so a caught handler panic
+# can render as a response rather than aborting the process with no diagnostics.
+[profile.release]
+debug = 1          # line tables only: a usable backtrace in the ERROR log, no full debuginfo

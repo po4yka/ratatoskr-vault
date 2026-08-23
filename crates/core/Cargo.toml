@@ -1,0 +1,23 @@
+[package]
+name        = "ratatoskr-vault-core"
+description = "Typed configuration, validation, and the error taxonomy for Ratatoskr Vault."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+figment.workspace = true
+http.workspace    = true
+secrecy.workspace = true
+serde.workspace   = true
+thiserror.workspace = true
+tracing-subscriber.workspace = true
+url.workspace     = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

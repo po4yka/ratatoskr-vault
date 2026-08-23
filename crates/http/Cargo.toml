@@ -1,0 +1,26 @@
+[package]
+name        = "ratatoskr-vault-http"
+description = "The shared HTTP harness every Vault deployable runs: lifecycle, admin plane, graceful stop."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+axum.workspace     = true
+http.workspace     = true
+metrics.workspace  = true
+metrics-exporter-prometheus.workspace = true
+ratatoskr-vault-core.workspace = true
+ratatoskr-vault-persistence.workspace = true
+ratatoskr-vault-telemetry.workspace = true
+serde.workspace    = true
+tokio.workspace    = true
+tracing.workspace  = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[lints]
+workspace = true

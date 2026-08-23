@@ -1,0 +1,27 @@
+[package]
+name        = "ratatoskr-vault-persistence"
+description = "The PostgreSQL pool Vault owns, the embedded git_vault schema, and the readiness probe."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+ratatoskr-vault-core.workspace = true
+secrecy.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tracing-subscriber.workspace = true
+
+[features]
+# Test-only scaffolding: a disposable per-test database. Never compiled into a service binary.
+test-support = []
+
+[lints]
+workspace = true
