@@ -1,0 +1,29 @@
+[package]
+name        = "ratatoskr-vault-telemetry"
+description = "Tracing subscriber, optional OTLP export, Prometheus recorder, and the wire identity of Ratatoskr Vault."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+http.workspace    = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+ratatoskr-vault-core.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+tokio.workspace   = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

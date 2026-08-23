@@ -1,0 +1,25 @@
+[package]
+name        = "ratatoskr-vault"
+description = "The Ratatoskr Vault deployable: durable backup and restore for Git repositories."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[[bin]]
+name = "ratatoskr-vault"
+path = "src/main.rs"
+
+[dependencies]
+ratatoskr-vault-core.workspace     = true
+ratatoskr-vault-http.workspace     = true
+ratatoskr-vault-persistence.workspace = true
+tokio.workspace                    = true
+tracing.workspace                  = true
+
+[dev-dependencies]
+ratatoskr-vault-persistence = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

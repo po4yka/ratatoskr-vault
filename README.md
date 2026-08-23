@@ -2,7 +2,7 @@
 
 `ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
-> **Status:** architecture bootstrap. No mirror worker, storage schema, Git command runner, snapshot format, or restore verifier is implemented yet.
+> **Status:** service scaffold implemented. A Rust workspace runs the `ratatoskr-vault` deployable with typed configuration, structured telemetry, an operator health plane (`/health/live`, `/health/ready`, `/metrics`, `/version`), and the first version of the `git_vault` PostgreSQL schema (`schema.sql`, applied in place — no migrations). No mirror worker, Git command runner, snapshot format, storage backend, or restore verifier exists yet; those are implementation plan items 2–10 in `docs/IMPLEMENTATION_PLAN.md`.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -339,4 +339,6 @@ Structured logs and traces include target ID, operation ID, attempt ID, command 
 
 ## Project status
 
-This README defines the intended backup and restore architecture. No Git runner, storage backend, mirror, snapshot, or restore workflow exists in this repository yet.
+The service scaffold (implementation plan item 1) is implemented: `crates/{core,telemetry,persistence,http}` and `services/vault` per the layout in `docs/ARCHITECTURE.md` section 3. The binary loads strict typed configuration from the environment, installs tracing with optional OTLP export, serves the operator health plane on the admin listener, applies `schema.sql` to a fresh database, and stops gracefully on SIGTERM. The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
+
+Not yet implemented: desired-state reconciliation and state machines (plan item 2), the confined Git runner (3), mirror lifecycle (4), snapshots and manifests (5), verification and restore drills (6), off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10). The schema carries their tables as first-version placeholders; no code claims capabilities they do not have.

@@ -1,0 +1,152 @@
+//! A disposable database per test.
+//!
+//! Enabled by the `test-support` feature so it is never compiled into a service binary.
+//!
+//! Each test gets its own database rather than its own transaction. A transaction would be
+//! faster, but the things worth testing here — a CHECK constraint firing, an idempotent re-apply,
+//! a unique index refusing a duplicate — behave differently inside one, and a suite that cannot
+//! observe a constraint firing is not testing the schema it claims to test.
+
+use std::env;
+
+use secrecy::SecretString;
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+use sqlx::{ConnectOptions as _, Executor as _};
+use uuid::Uuid;
+
+use crate::{Database, PersistenceError};
+
+/// How many connections one test may hold.
+///
+/// Two, not the sqlx default of ten. The suite runs several test binaries at once and each test
+/// in them creates its own database, so a default-sized pool per test exhausts the server's
+/// `max_connections` long before the tests are slow. A test that needs more than two concurrent
+/// connections is testing concurrency and should say so.
+const TEST_POOL_SIZE: u32 = 2;
+
+/// Where the disposable databases are created.
+///
+/// `VAULT_TEST_DATABASE_URL` overrides it; the default matches `compose.yaml`, so `docker compose
+/// up -d` followed by `cargo test` works with no further setup.
+#[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the workspace bans direct environment reads so that configuration has exactly one \
+              loader. This is test-only scaffolding that never runs in a service binary, and it \
+              reads a variable that is not part of the vault configuration at all: it names where \
+              a test may create and drop databases."
+)]
+pub fn admin_url() -> String {
+    env::var("VAULT_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://vault:vault@127.0.0.1:5432/vault".to_owned())
+}
+
+/// A database that drops itself.
+#[derive(Debug)]
+pub struct TestDatabase {
+    /// The connected pool, with the schema applied and ready.
+    pub database: Database,
+    name: String,
+}
+
+impl TestDatabase {
+    /// Create a fresh database, apply the embedded schema, and connect to it.
+    ///
+    /// # Errors
+    ///
+    /// [`PersistenceError::Connect`] if the server is unreachable — which is a real failure, not a
+    /// reason to skip: a suite that silently passes without a database proves nothing.
+    pub async fn create() -> Result<Self, PersistenceError> {
+        let name = format!("vault_test_{}", Uuid::now_v7().simple());
+        let admin = admin_url();
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin)
+            .await
+            .map_err(PersistenceError::Connect)?;
+        // The name is generated from a UUID, so it cannot carry an injection; `PostgreSQL` has no
+        // bind parameters for an identifier in DDL.
+        //
+        // The locale is stated rather than inherited. A bare `create database` copies template1,
+        // whose collation is a property of the cluster somebody happened to start — ICU under
+        // `compose.yaml`, the runner's glibc in CI, the host's glibc on a laptop. Three collations
+        // across the three places that check each other is how a text index sorts one way where it
+        // is built and another where it is read. ICU because `PostgreSQL` tracks its version and
+        // warns on a mismatch, while a glibc collation changes silently across a distribution
+        // upgrade. Byte-identical to compose.yaml and ci.yml on purpose.
+        pool.execute(
+            format!(
+                r#"create database "{name}" template template0
+                   locale_provider icu icu_locale 'und-x-icu' encoding 'UTF8'"#
+            )
+            .as_str(),
+        )
+        .await
+        .map_err(PersistenceError::Query)?;
+        pool.close().await;
+
+        let options: PgConnectOptions = admin
+            .parse::<PgConnectOptions>()
+            .map_err(PersistenceError::Connect)?
+            .database(&name)
+            .log_statements(tracing::log::LevelFilter::Off);
+
+        let pool = PgPoolOptions::new()
+            .max_connections(TEST_POOL_SIZE)
+            .connect_with(options)
+            .await
+            .map_err(PersistenceError::Connect)?;
+        let database = Database { pool };
+        database.apply_schema().await?;
+
+        Ok(Self { database, name })
+    }
+
+    /// The pool under test.
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        self.database.pool()
+    }
+
+    /// The connection URL of this database, for a test that starts the real binary against it.
+    ///
+    /// [`admin_url`] with the database name replaced. A test that needs this is testing a BINARY
+    /// rather than a query, and it needs a prepared database that no other test is writing to —
+    /// which is exactly what this type already produces.
+    #[must_use]
+    pub fn url(&self) -> String {
+        let admin = admin_url();
+        let (prefix, _) = admin.rsplit_once('/').unwrap_or((admin.as_str(), ""));
+        format!("{prefix}/{}", self.name)
+    }
+
+    /// The connection URL as a configured secret, for tests that build a [`DatabaseConfig`].
+    #[must_use]
+    pub fn secret_url(&self) -> SecretString {
+        SecretString::from(self.url())
+    }
+
+    /// Drop the database.
+    ///
+    /// Explicit rather than a `Drop` impl: dropping requires async work, and a blocking drop
+    /// inside a Tokio worker deadlocks. A test that panics leaves its database behind, which is a
+    /// feature while the failure is being investigated.
+    ///
+    /// # Errors
+    ///
+    /// [`PersistenceError::Query`] if the drop fails.
+    pub async fn cleanup(self) -> Result<(), PersistenceError> {
+        self.database.close().await;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url())
+            .await
+            .map_err(PersistenceError::Connect)?;
+        pool.execute(format!(r#"drop database if exists "{}" with (force)"#, self.name).as_str())
+            .await
+            .map_err(PersistenceError::Query)?;
+        pool.close().await;
+        Ok(())
+    }
+}
