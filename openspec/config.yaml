@@ -8,7 +8,7 @@ context: |
 
   Stack: Rust/Tokio, system Git and Git LFS through structured process execution, SQLx/PostgreSQL, local and S3-compatible BlobStore, checksums and manifests, testcontainers, tracing, isolated filesystem and process test harnesses.
 
-  This repository holds no code yet. Its documents describe intent; a change here plans behaviour, and the first code arrives with its own ci.yml, its lint configuration carrying the size limits, and its tests.
+  The service foundation exists: a five-package Rust workspace, strict finite configuration, structured telemetry, operator health routes, one editable git_vault schema, disposable-database tests, and CI. Reconciliation, Git execution, mirrors, snapshots, storage, restore, retention, and eventing remain planned.
 
   The gate command list is the fenced block in DEVELOPMENT.md. That list and .github/workflows/ci.yml are one list, and a step in ci.yml fails when they differ, so change both or neither.
 

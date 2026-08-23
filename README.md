@@ -291,25 +291,19 @@ Per-target retries use bounded exponential backoff and circuit breaking. One dam
 
 ## Observability
 
-Core metrics include:
+The implemented foundation exports:
 
 ```text
-vault_targets_by_state
-vault_sync_duration
-vault_sync_failures
-vault_mirror_age
-vault_snapshot_age
-vault_snapshot_bytes
-vault_verification_failures
-vault_restore_age
-vault_restore_failures
-vault_storage_bytes
-vault_storage_free_bytes
-vault_lfs_incomplete
-vault_pruned_artifacts
+vault_build_info
+vault_readiness
 ```
 
-Structured logs and traces include target ID, operation ID, attempt ID, command class, storage backend, and result classification, but never embedded credentials.
+Target, sync, mirror, snapshot, verification, restore, storage, LFS, and retention metrics remain
+planned with the capabilities that would produce them.
+
+Future target, operation, attempt, command, storage, and result spans will include their identifiers
+and classifications, but never embedded credentials. The implemented foundation currently records
+process lifecycle and startup or shutdown context.
 
 ## Non-goals
 
@@ -320,22 +314,18 @@ Structured logs and traces include target ID, operation ID, attempt ID, command 
 - Automatic deletion immediately after upstream removal.
 - Claiming complete GitHub backup when only Git objects were preserved.
 
-## Initial milestones
+## Implementation plan
 
-1. Define target, mirror, snapshot, and verification schemas.
-2. Implement the confined Git command runner.
-3. Support initial `git clone --mirror` and periodic updates.
-4. Add `git fsck` and full bundle snapshots.
-5. Add content-addressed local storage and manifests.
-6. Add S3-compatible off-host upload and verification.
-7. Add LFS and wiki collectors.
-8. Add scheduled restore drills.
-9. Import and adopt existing legacy mirrors without unnecessary recloning.
-10. Add retention, tombstones, and safe pruning.
+The authoritative sequence is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Item 1,
+the service foundation, is implemented. Items 2 through 10 remain planned.
 
 ## Workspace integration
 
-`ratatoskr-workspace` pins Vault with compatible desired-state contracts and GitHub Catalog changes. System integration tests must include real temporary repositories, corruption fixtures, off-host emulation, and verified restore scenarios. Vault remains independently operable if the public Edge service is unavailable.
+The planned `ratatoskr-workspace` topology will pin Vault with compatible desired-state contracts and
+GitHub Catalog changes. No workspace pin or GitHub-to-Vault integration profile exists yet. Future
+system integration tests must include real temporary repositories, corruption fixtures, off-host
+emulation, and verified restore scenarios. Vault remains independently operable if the public Edge
+service is unavailable.
 
 ## Project status
 

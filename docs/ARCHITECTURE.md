@@ -1,6 +1,8 @@
 # Ratatoskr Vault Architecture
 
-> Status: target architecture. The repository is in architecture bootstrap; this document defines the intended backup, verification, retention, and restore boundaries.
+> Status: target architecture. The Rust service foundation, operator health plane, current
+> `git_vault` schema, and CI gate are implemented. Reconciliation, Git execution, storage,
+> verification, restore, retention, and the remaining sections are planned.
 
 ## 1. Purpose
 
@@ -70,7 +72,7 @@ ratatoskr-vault/
 │   └── vault/
 ├── tools/
 │   └── restore-verifier/
-├── migrations/
+├── schema.sql
 ├── fixtures/
 ├── tests/
 └── docs/

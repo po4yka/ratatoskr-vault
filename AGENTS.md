@@ -17,7 +17,11 @@ A successful `git fetch` is not a successful backup. Backup success requires ver
 
 ## Current phase
 
-The repository is in architecture bootstrap. Do not assume Rust crates, workers, storage adapters, migrations, sandboxing, or CI commands exist unless they are present in the checkout.
+Implementation-plan item 1 is complete. The Rust workspace, strict configuration, structured
+telemetry, operator health plane, one editable `schema.sql`, disposable-database tests, and CI gate
+exist. Reconciliation workers, the Git runner, mirrors, snapshots, storage adapters, restore
+verification, retention, and eventing remain absent. Do not assume anything beyond the service
+foundation exists unless it is present in the checkout.
 
 When creating initial implementation:
 
@@ -432,7 +436,7 @@ Do not assume eventual consistency cannot affect immediately following verificat
 - Provide backpressure rather than starting unbounded Git processes.
 - Scheduler requests work; Vault owns execution timing, retries, and provider/source constraints.
 
-## Persistence and migrations
+## Persistence and schema evolution
 
 Vault writes only its owned schema.
 
@@ -454,7 +458,8 @@ vault_outbox
 vault_inbox
 ```
 
-No cross-schema writes or foreign keys. Preserve verification and audit history through migrations.
+No cross-schema writes or foreign keys. While the development status above holds, a schema change
+edits the current definition in place and disposable databases are recreated from it.
 
 Schema changes that affect artifact interpretation require manifest/version compatibility and restore testing.
 
@@ -521,7 +526,7 @@ When implementation exists, include applicable tests for:
 - restore from artifact without source access;
 - retention, pin precedence, grace period, and deletion safety;
 - disk quota and cancellation behavior;
-- migrations and manifest compatibility;
+- current-schema and manifest compatibility;
 - outbox/inbox replay.
 
 Use synthetic repositories and local fixture servers. Never rely on personal production repositories or credentials in normal tests.
@@ -565,4 +570,4 @@ A task is complete only when:
 - retention/deletion respects pinning, grace, audit, and path safety;
 - storage/offsite integrity is validated;
 - relevant hostile-input, state-machine, and restore tests pass;
-- contracts, migrations, telemetry, and cross-repository rollout are documented.
+- contracts, schema, telemetry, and cross-repository rollout are documented.

@@ -11,7 +11,7 @@ Required tests:
 - Isolated restore and ref/object/LFS comparison.
 - Quotas, process groups, environment/path confinement, and output redaction.
 - Pin/grace/tombstone/retention/physical deletion matrix.
-- SQL migrations, outbox/inbox replay, and GitHub->Vault workspace flow.
+- Current-schema application, outbox/inbox replay, and GitHub-to-Vault workspace flow.
 
 A test suite must prove that a successful fetch with failed verification/restore is not reported healthy.
 
