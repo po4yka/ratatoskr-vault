@@ -83,6 +83,112 @@ create unique index targets_provider_external_id_key
     on git_vault.targets (provider, external_repository_id);
 
 -- ---------------------------------------------------------------------------------------------
+-- The target transition guard
+-- ---------------------------------------------------------------------------------------------
+
+-- Canonical order of the eleven target states (AGENTS.md "Target and snapshot state machines").
+-- Rank orders the vocabulary for deterministic reporting; it does NOT decide legality: the
+-- machine is a graph, not a ladder (excluded -> requested is legal while healthy -> fetching is
+-- not), so legality lives in the pair set the trigger below checks.
+create function git_vault.target_status_rank(status text) returns int
+    language sql immutable strict parallel safe
+as $$
+    select case status
+        when 'requested'    then 0
+        when 'cloning'      then 1
+        when 'ready'        then 2
+        when 'fetching'     then 3
+        when 'snapshotting' then 4
+        when 'verifying'    then 5
+        when 'healthy'      then 6
+        when 'degraded'     then 7
+        when 'paused'       then 8
+        when 'excluded'     then 9
+        when 'deleting'     then 10
+    end
+$$;
+
+comment on function git_vault.target_status_rank(text) is
+    'Position of a target status in the canonical vocabulary order. An ordering helper only; '
+    'whether a move itself is legal is decided by target_guard_status_transition.';
+
+create function git_vault.target_guard_status_transition() returns trigger
+    language plpgsql
+as $$
+begin
+    if new.status = old.status then
+        -- Not a transition. Same-status writes are annotations, always permitted, never events.
+        return new;
+    end if;
+
+    -- The single normative pair set, mirrored from ratatoskr_vault_core::Transition::TRANSITIONS.
+    -- The agreement walk asserts the two agree on every ordered pair, because two enforcement
+    -- points that disagree are worse than one.
+    if not exists (
+        select 1
+        from (values
+            ('requested',    'cloning'),
+            ('requested',    'excluded'),
+            ('requested',    'deleting'),
+            ('cloning',      'ready'),
+            ('cloning',      'degraded'),
+            ('cloning',      'excluded'),
+            ('cloning',      'deleting'),
+            ('ready',        'fetching'),
+            ('ready',        'degraded'),
+            ('ready',        'paused'),
+            ('ready',        'excluded'),
+            ('ready',        'deleting'),
+            ('fetching',     'snapshotting'),
+            ('fetching',     'degraded'),
+            ('fetching',     'paused'),
+            ('fetching',     'excluded'),
+            ('fetching',     'deleting'),
+            ('snapshotting', 'verifying'),
+            ('snapshotting', 'degraded'),
+            ('snapshotting', 'deleting'),
+            ('verifying',    'healthy'),
+            ('verifying',    'degraded'),
+            ('verifying',    'deleting'),
+            ('healthy',      'fetching'),
+            ('healthy',      'degraded'),
+            ('healthy',      'paused'),
+            ('healthy',      'excluded'),
+            ('healthy',      'deleting'),
+            ('degraded',     'fetching'),
+            ('degraded',     'paused'),
+            ('degraded',     'excluded'),
+            ('degraded',     'deleting'),
+            ('paused',       'ready'),
+            ('paused',       'excluded'),
+            ('paused',       'deleting'),
+            ('excluded',     'requested'),
+            ('excluded',     'deleting')
+        ) as legal(from_status, to_status)
+        where legal.from_status = old.status
+          and legal.to_status = new.status
+    ) then
+        raise exception
+            'illegal target transition % -> %',
+            old.status, new.status
+            using errcode = 'VLT01';
+    end if;
+
+    return new;
+end;
+$$;
+
+comment on function git_vault.target_guard_status_transition() is
+    'The durable backstop for the target state machine. The authoritative table is '
+    'ratatoskr_vault_core::Transition in Rust; this trigger enforces the same rule for any '
+    'writer that bypasses it, including a manual UPDATE, and raises SQLSTATE VLT01 on a refusal.';
+
+create trigger targets_guard_status_transition
+    before update of status on git_vault.targets
+    for each row
+    execute function git_vault.target_guard_status_transition();
+
+-- ---------------------------------------------------------------------------------------------
 -- desired_state_revisions: every accepted revision of what Catalog wants, append-only
 -- ---------------------------------------------------------------------------------------------
 
@@ -434,8 +540,10 @@ create table git_vault.outbox (
     created_at      timestamptz not null,
     published_at    timestamptz,
 
+    -- Event names may carry several dotted segments (design D6: vault.target.state_changed.v1);
+    -- the version suffix stays terminal and numeric.
     constraint outbox_event_type_is_versioned
-        check (event_type ~ '^vault\.[a-z_]+\.v[0-9]+$'),
+        check (event_type ~ '^vault(\.[a-z_]+)+\.v[0-9]+$'),
     constraint outbox_aggregate_type_is_bounded
         check (length(aggregate_type) between 1 and 64)
 );

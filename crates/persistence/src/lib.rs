@@ -15,8 +15,13 @@ pub mod test_support;
 
 use std::time::Duration;
 
+use ratatoskr_vault_core::delivery::ValidatedDelivery;
+use ratatoskr_vault_core::error::VaultError;
+use ratatoskr_vault_core::target_state::TargetStatus;
 use secrecy::ExposeSecret as _;
+use sqlx::error::DatabaseError;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use uuid::Uuid;
 
 /// The schema, embedded at compile time.
 ///
@@ -122,6 +127,335 @@ impl Database {
             .map_err(PersistenceError::Query)
     }
 
+    /// Sets one target's status through whatever the database enforces.
+    ///
+    /// Deliberately no transition logic of its own: the guard is database-side (`schema.sql`),
+    /// so this op and a manual UPDATE meet exactly the same rule.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::IllegalTransition`] naming both statuses when the guard refuses the move;
+    /// [`VaultError::StorageFailed`] when anything else fails, with the underlying error logged.
+    pub async fn set_target_status(
+        &self,
+        target_id: Uuid,
+        status: TargetStatus,
+    ) -> Result<(), VaultError> {
+        sqlx::query("update git_vault.targets set status = $2 where target_id = $1")
+            .bind(target_id)
+            .bind(status.as_str())
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|err| classify_status_update_failure(&err))
+    }
+
+    /// Applies one governed transition to a target in one transaction.
+    ///
+    /// The governing revision lands as append-only evidence, the target row is taken with
+    /// `SELECT ... FOR UPDATE`, the status write faces the database guard like any other writer,
+    /// and the state-changed event joins the same commit only when the status truly changed:
+    /// same-status writes are annotations, never events.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::InvalidDelivery`] naming the rejected field when the governing record lacks
+    /// a usable revision or correlation id, or names an unknown target;
+    /// [`VaultError::IllegalTransition`] carrying both statuses when the guard refuses the move,
+    /// with nothing committed; [`VaultError::StorageFailed`] for infrastructure failures, logged.
+    pub async fn apply_transition(
+        &self,
+        target_id: Uuid,
+        to_status: TargetStatus,
+        governing: &ValidatedDelivery,
+    ) -> Result<(), VaultError> {
+        let (policy_revision, correlation_id) = governed_inputs(governing)?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| classify_status_update_failure(&err))?;
+
+        sqlx::query(
+            "insert into git_vault.desired_state_revisions
+                 (revision_id, target_id, policy_revision, preservation_level, pinned,
+                  include_wiki, include_releases, include_issues, offsite_required,
+                  correlation_id, received_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+             on conflict do nothing",
+        )
+        .bind(Uuid::now_v7())
+        .bind(target_id)
+        .bind(policy_revision)
+        .bind(&governing.preservation_level)
+        .bind(governing.pinned.unwrap_or(false))
+        .bind(governing.include_wiki.unwrap_or(false))
+        .bind(governing.include_releases.unwrap_or(false))
+        .bind(governing.include_issues.unwrap_or(false))
+        .bind(governing.offsite_required.unwrap_or(false))
+        .bind(correlation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| classify_status_update_failure(&err))?;
+
+        let current: Option<String> = sqlx::query_scalar(
+            "select status from git_vault.targets where target_id = $1 for update",
+        )
+        .bind(target_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|err| classify_status_update_failure(&err))?;
+        let Some(from_status) = current else {
+            return Err(VaultError::InvalidDelivery { field: "target_id" });
+        };
+
+        sqlx::query(
+            "update git_vault.targets set status = $2, updated_at = now() where target_id = $1",
+        )
+        .bind(target_id)
+        .bind(to_status.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| classify_status_update_failure(&err))?;
+
+        if from_status != to_status.as_str() {
+            sqlx::query(
+                "insert into git_vault.outbox
+                     (event_id, event_type, aggregate_type, aggregate_id, payload, created_at)
+                 values ($1, 'vault.target.state_changed.v1', 'target', $2,
+                         jsonb_build_object('target_id', $2, 'from_status', $3,
+                                            'to_status', $4, 'policy_revision', $5,
+                                            'correlation_id', $6),
+                         now())",
+            )
+            .bind(Uuid::now_v7())
+            .bind(target_id)
+            .bind(&from_status)
+            .bind(to_status.as_str())
+            .bind(policy_revision)
+            .bind(correlation_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| classify_status_update_failure(&err))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|err| classify_status_update_failure(&err))
+    }
+
+    /// Ingests one delivered desired-state message in one transaction: the inbox slot is
+    /// claimed first, so a redelivered `(source, message_id)` pair is refused before any state
+    /// work happens; then the target row is ensured on first sight, and the governing record
+    /// lands as append-only revision evidence.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::DuplicateDelivery`] when the pair was consumed already, leaving nothing
+    /// written; [`VaultError::InvalidDelivery`] naming the rejected field when the governing
+    /// record lacks a usable revision or correlation id; [`VaultError::StorageFailed`] for
+    /// infrastructure failures, logged.
+    pub async fn ingest_delivery(
+        &self,
+        provider: &str,
+        external_repository_id: &str,
+        source: &str,
+        message_id: Uuid,
+        delivery: &ValidatedDelivery,
+    ) -> Result<Uuid, VaultError> {
+        let (policy_revision, correlation_id) = governed_inputs(delivery)?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| classify_status_update_failure(&err))?;
+
+        let claim = sqlx::query(
+            "insert into git_vault.inbox (message_id, source, consumed_at) values ($1, $2, now())",
+        )
+        .bind(message_id)
+        .bind(source)
+        .execute(&mut *tx)
+        .await;
+        if let Err(err) = claim {
+            if err
+                .as_database_error()
+                .is_some_and(DatabaseError::is_unique_violation)
+            {
+                return Err(VaultError::DuplicateDelivery);
+            }
+            return Err(classify_status_update_failure(&err));
+        }
+
+        let created: Option<Uuid> = sqlx::query_scalar(
+            "insert into git_vault.targets
+                 (target_id, provider, external_repository_id, status, created_at, updated_at)
+             values ($1, $2, $3, 'requested', now(), now())
+             on conflict (provider, external_repository_id) do nothing
+             returning target_id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(provider)
+        .bind(external_repository_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|err| classify_status_update_failure(&err))?;
+
+        let target_id = match created {
+            Some(id) => {
+                // First sight is enrollment (design D6): the insert of the target row IS the
+                // status write, so its event joins the same transaction as null -> requested.
+                sqlx::query(
+                    "insert into git_vault.outbox
+                         (event_id, event_type, aggregate_type, aggregate_id, payload, created_at)
+                     values ($1, 'vault.target.state_changed.v1', 'target', $2,
+                             jsonb_build_object('target_id', $2, 'from_status', null,
+                                                'to_status', 'requested',
+                                                'policy_revision', $3,
+                                                'correlation_id', $4),
+                             now())",
+                )
+                .bind(Uuid::now_v7())
+                .bind(id)
+                .bind(policy_revision)
+                .bind(correlation_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| classify_status_update_failure(&err))?;
+                id
+            }
+            None => sqlx::query_scalar(
+                "select target_id from git_vault.targets
+                     where provider = $1 and external_repository_id = $2 for update",
+            )
+            .bind(provider)
+            .bind(external_repository_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|err| classify_status_update_failure(&err))?
+            .ok_or(VaultError::InvalidDelivery { field: "target_id" })?,
+        };
+
+        sqlx::query(
+            "insert into git_vault.desired_state_revisions
+                 (revision_id, target_id, policy_revision, preservation_level, pinned,
+                  include_wiki, include_releases, include_issues, offsite_required,
+                  correlation_id, received_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+             on conflict do nothing",
+        )
+        .bind(Uuid::now_v7())
+        .bind(target_id)
+        .bind(policy_revision)
+        .bind(&delivery.preservation_level)
+        .bind(delivery.pinned.unwrap_or(false))
+        .bind(delivery.include_wiki.unwrap_or(false))
+        .bind(delivery.include_releases.unwrap_or(false))
+        .bind(delivery.include_issues.unwrap_or(false))
+        .bind(delivery.offsite_required.unwrap_or(false))
+        .bind(correlation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| classify_status_update_failure(&err))?;
+
+        tx.commit()
+            .await
+            .map_err(|err| classify_status_update_failure(&err))?;
+
+        Ok(target_id)
+    }
+
+    /// Reads the one revision that governs a target's reconciliation.
+    ///
+    /// Governance is read-time and number-based (design D3): the maximum delivered revision
+    /// rules regardless of arrival order, while every stale row stays as evidence.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::StorageFailed`] for infrastructure failures, logged.
+    pub async fn governing_policy(
+        &self,
+        target_id: Uuid,
+    ) -> Result<Option<GoverningPolicy>, VaultError> {
+        let row: Option<GoverningRow> = sqlx::query_as(
+            "select target_id, policy_revision, preservation_level, pinned,
+                    include_wiki, include_releases, include_issues, offsite_required,
+                    correlation_id
+             from git_vault.desired_state_revisions
+             where target_id = $1
+             order by policy_revision desc
+             limit 1",
+        )
+        .bind(target_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| classify_status_update_failure(&err))?;
+
+        Ok(row.map(
+            |(
+                target_id,
+                policy_revision,
+                preservation_level,
+                pinned,
+                include_wiki,
+                include_releases,
+                include_issues,
+                offsite_required,
+                correlation_id,
+            )| {
+                GoverningPolicy {
+                    target_id,
+                    policy_revision,
+                    preservation_level,
+                    pinned,
+                    include_wiki,
+                    include_releases,
+                    include_issues,
+                    offsite_required,
+                    correlation_id,
+                }
+            },
+        ))
+    }
+
+    /// Reads a target's currently stored status through the closed vocabulary.
+    ///
+    /// [`None`] when no such target row exists.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::StorageFailed`] for infrastructure failures, logged.
+    pub async fn observed_status(
+        &self,
+        target_id: Uuid,
+    ) -> Result<Option<TargetStatus>, VaultError> {
+        let status: Option<String> =
+            sqlx::query_scalar("select status from git_vault.targets where target_id = $1")
+                .bind(target_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|err| classify_status_update_failure(&err))?;
+
+        let Some(status) = status else {
+            return Ok(None);
+        };
+        if let Some(known) = TargetStatus::ALL
+            .iter()
+            .copied()
+            .find(|known| known.as_str() == status)
+        {
+            Ok(Some(known))
+        } else {
+            tracing::warn!(
+                status = %status,
+                "a stored target status is outside the vocabulary"
+            );
+            Err(VaultError::StorageFailed)
+        }
+    }
+
     /// The pool, for the crate that owns the schema's queries.
     #[must_use]
     pub fn pool(&self) -> &PgPool {
@@ -166,3 +500,91 @@ async fn lock_and_apply(connection: &mut sqlx::PgConnection) -> Result<(), sqlx:
 
     Ok(())
 }
+
+/// The SQLSTATE the target guard raises for an illegal move (`schema.sql`).
+const GUARD_ERRCODE: &str = "VLT01";
+
+/// Maps one failed status update onto the typed error set.
+///
+/// The guard's refusal message is ours to define (`illegal target transition <from> -> <to>`),
+/// so both statuses travel with the error. Everything else is storage-level detail that stays
+/// on the telemetry channel rather than inside the value.
+fn classify_status_update_failure(err: &sqlx::Error) -> VaultError {
+    let refusal = err
+        .as_database_error()
+        .filter(|db| db.code().as_deref() == Some(GUARD_ERRCODE));
+    if let Some(db) = refusal {
+        let parsed = db
+            .message()
+            .strip_prefix("illegal target transition ")
+            .and_then(|rest| rest.split_once(" -> "));
+        if let Some((from, to)) = parsed {
+            return VaultError::IllegalTransition {
+                from: from.to_owned(),
+                to: to.to_owned(),
+            };
+        }
+        tracing::warn!(
+            guard_message = db.message(),
+            "the target guard refused a move in an unexpected message shape"
+        );
+        return VaultError::StorageFailed;
+    }
+    tracing::warn!(error = %err, "a target status update failed");
+    VaultError::StorageFailed
+}
+
+/// The revision number and correlation id every governed record must carry, checked once at
+/// the persistence edge.
+fn governed_inputs(delivery: &ValidatedDelivery) -> Result<(i64, Uuid), VaultError> {
+    let policy_revision = delivery
+        .policy_revision
+        .ok_or(VaultError::InvalidDelivery {
+            field: "policy_revision",
+        })?;
+    let policy_revision =
+        i64::try_from(policy_revision).map_err(|_| VaultError::InvalidDelivery {
+            field: "policy_revision",
+        })?;
+    let correlation_id: Uuid =
+        delivery
+            .correlation_id
+            .parse()
+            .map_err(|_| VaultError::InvalidDelivery {
+                field: "correlation_id",
+            })?;
+    Ok((policy_revision, correlation_id))
+}
+
+/// The one revision that governs a target's reconciliation, as planning may consume it.
+///
+/// The flags stay plain bools because the database columns are NOT NULL; they mirror the
+/// desired-state contract's independent toggles one-to-one.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "five independent contract flags map straight onto five independent columns"
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoverningPolicy {
+    /// The target this record governs.
+    pub target_id: Uuid,
+    /// The governing revision number.
+    pub policy_revision: i64,
+    /// Preservation level exactly as recorded.
+    pub preservation_level: String,
+    /// Whether the target resists automatic exclusion.
+    pub pinned: bool,
+    /// Whether the wiki repository is included.
+    pub include_wiki: bool,
+    /// Whether releases and their assets are included.
+    pub include_releases: bool,
+    /// Whether issues and comments are included.
+    pub include_issues: bool,
+    /// Whether an off-host copy is required.
+    pub offsite_required: bool,
+    /// The correlation id of the governing delivery.
+    pub correlation_id: Uuid,
+}
+
+/// One governing-revision row straight from the query; positional order must match the SELECT.
+type GoverningRow = (Uuid, i64, String, bool, bool, bool, bool, bool, Uuid);

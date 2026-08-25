@@ -17,9 +17,11 @@ ratatoskr-vault-http.workspace     = true
 ratatoskr-vault-persistence.workspace = true
 tokio.workspace                    = true
 tracing.workspace                  = true
+uuid.workspace                     = true
 
 [dev-dependencies]
 ratatoskr-vault-persistence = { workspace = true, features = ["test-support"] }
+sqlx.workspace              = true
 
 [lints]
 workspace = true
