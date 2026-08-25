@@ -1,0 +1,27 @@
+[package]
+name        = "ratatoskr-vault-gitrunner"
+description = "Vault's confined execution of the system Git binary: structural commands, allowlists, bounded output, and hostile-repository containment."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+nix        = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true, features = ["process", "io-util"] }
+tracing    = { workspace = true }
+uuid       = { workspace = true }
+
+[dev-dependencies]
+# `rt` is already inherited from the workspace tokio; tests need nothing extra.
+
+# The probe executable stands in for the trusted Git binary in bounds/environment tests.
+# `harness = false` makes this integration-test target a plain executable.
+[[test]]
+name = "probe"
+harness = false
+
+[lints]
+workspace = true
