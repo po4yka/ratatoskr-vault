@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/core",
+    "crates/gitrunner",
     "crates/telemetry",
     "crates/persistence",
     "crates/http",
@@ -18,9 +19,16 @@ repository   = "https://github.com/po4yka/ratatoskr-vault"
 [workspace.dependencies]
 # ---- in-repo ----
 ratatoskr-vault-core        = { version = "0.1.0", path = "crates/core" }
+ratatoskr-vault-gitrunner   = { version = "0.1.0", path = "crates/gitrunner" }
 ratatoskr-vault-telemetry   = { version = "0.1.0", path = "crates/telemetry" }
 ratatoskr-vault-persistence = { version = "0.1.0", path = "crates/persistence" }
 ratatoskr-vault-http        = { version = "0.1.0", path = "crates/http" }
+
+# ---- process confinement ----
+# Process-group signalling for the Git runner (kill on deadline/overflow). Safe wrappers over
+# the Unix syscalls: this workspace forbids `unsafe`, which rules out raw `libc` calls. Unix
+# only; Vault's supported deployment targets are Unix.
+nix = { version = "0.30", default-features = false, features = ["signal"] }
 
 # ---- persistence ----
 # No `migrate` feature: the schema is one file, `include_str!`d into the binary by

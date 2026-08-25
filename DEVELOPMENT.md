@@ -1,9 +1,9 @@
 # Developing Ratatoskr Vault
 
-> Status: Implemented (service scaffold)  
-> Last reviewed: 2026-08-22
+> Status: Implemented (foundation, reconciliation, confined Git runner)  
+> Last reviewed: 2026-08-25
 
-The service scaffold exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Mirror workers, Git execution, snapshots, retention, off-host storage, and eventing are later implementation plan items and do not exist yet.
+The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, and `crates/gitrunner` executes the system Git binary under structural confinement with its generated hostile-repository suite. Mirror workers, snapshots, retention, off-host storage, and eventing are later implementation plan items and do not exist yet.
 
 ## Toolchain
 
@@ -68,16 +68,42 @@ One file: `schema.sql` at the repository root, applied by the binary at startup 
 
 To reset a dirty local database: drop it (`docker compose down -v` recreates the cluster) — there is no upgrade path to preserve.
 
-## Git, LFS, storage, restore commands
+## Git commands (runner, plan item 3)
 
-Not implemented yet. Plan items 3–9 introduce the confined system-Git runner (`git clone --mirror`, `git remote update --prune`, `git fsck --full`, `git bundle create/verify`), Git LFS collection, local/S3-compatible BlobStore placement, and restore drills. When each lands, its exact commands are documented in this section and exercised by tests; until then the architecture intent lives in `docs/ARCHITECTURE.md` sections 7–14.
+`crates/gitrunner` owns every Git process. Operations are typed argument vectors against a closed `Subcommand` allowlist; there is no shell anywhere between intent and `exec`. The exact command surface today:
+
+```text
+git -c core.hooksPath=/dev/null clone --mirror <source-url> <confined-destination>
+git -c core.hooksPath=/dev/null fetch <source-url> +refs/*:refs/*
+git -c core.hooksPath=/dev/null fsck --full
+git -c core.hooksPath=/dev/null rev-list [--all | --objects --all]
+git -c core.hooksPath=/dev/null show-ref
+git version
+```
+
+Every child also receives a constructed environment: minimal `PATH`, `HOME` inside the run directory, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/dev/null`, `SSH_ASKPASS=/dev/null`, pager disabled, `LANG=C.UTF-8`. Nothing is inherited from Vault's own process.
+
+Source URLs accept only `https` and `file` schemes and must not begin with `-`. Destinations resolve inside Vault-owned roots at use time; intermediate symlinks leaving a root are refused; mirror paths derive from internal target ids (`<root>/mirrors/<shard>/<id>.git`). Each invocation carries a wall-clock deadline and per-stream output caps; overruns SIGKILL the child's process group (safe `nix` wrappers — this workspace forbids `unsafe`). A nonzero `fsck` becomes `GitRunnerError::IntegrityCheckFailed` with a bounded redacted excerpt.
+
+Credentials travel out of band through the Git credential-helper contract:
+
+```text
+git -c credential.helper=<path-to-git-credential-helper> <secret-file-path> fetch …
+```
+
+The helper binary (`ratatoskr-vault-gitrunner` ships it as `git-credential-helper`) reads an owner-only secret file inside an owner-only run directory and answers the credential protocol on stdout. Secrets never appear in argv or environment blocks; captured output is scanned against active secret material before leaving the runner; the secret file is deleted when the operation ends. The trade-off — a brief `0600` file instead of fd passing — is recorded in the change design because fd inheritance beyond stdio is not expressible under the `unsafe` ban.
+
+LFS collection, BlobStore placement, bundle verbs, and restore drills are later plan items and have no commands here yet; until then the architecture intent lives in `docs/ARCHITECTURE.md` sections 7–14.
 
 ## Tests
 
 ```bash
 cargo test --workspace --locked          # unit + integration + the binary boot test
 cargo test -p ratatoskr-vault-core       # configuration strictness and the error taxonomy only
+cargo test -p ratatoskr-vault-gitrunner  # confinement, bounds, credentials, hostile repositories
 ```
+
+The gitrunner suite needs no database and no network: fixtures are generated local repositories under temporary roots, and the bounds tests substitute a probe executable for the trusted Git binary path.
 
 Integration tests create their own disposable databases (`vault_test_<uuid>`) against the server `VAULT_TEST_DATABASE_URL` names, apply the schema themselves, and drop them on success. A panicking test leaves its database behind on purpose, for post-mortem.
 

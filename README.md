@@ -2,7 +2,7 @@
 
 `ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
-> **Status:** service scaffold implemented. A Rust workspace runs the `ratatoskr-vault` deployable with typed configuration, structured telemetry, an operator health plane (`/health/live`, `/health/ready`, `/metrics`, `/version`), and the first version of the `git_vault` PostgreSQL schema (`schema.sql`, applied in place — no migrations). No mirror worker, Git command runner, snapshot format, storage backend, or restore verifier exists yet; those are implementation plan items 2–10 in `docs/IMPLEMENTATION_PLAN.md`.
+> **Status:** foundation and confined Git execution implemented. A Rust workspace runs the `ratatoskr-vault` deployable with typed configuration, structured telemetry, an operator health plane (`/health/live`, `/health/ready`, `/metrics`, `/version`), the first version of the `git_vault` PostgreSQL schema (`schema.sql`, applied in place — no migrations), desired-state reconciliation with a guarded target state machine, and `crates/gitrunner`, the confined system-Git runner with its generated hostile-repository suite. No mirror worker, snapshot format, storage backend, or restore verifier exists yet; those are implementation plan items 4–10 in `docs/IMPLEMENTATION_PLAN.md`.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -82,20 +82,22 @@ Every transition is explicit and auditable. Retry attempts, backoff, last succes
 
 ## Git execution model
 
-The primary implementation uses the system Git CLI through `tokio::process::Command` rather than reimplementing backup semantics in an embedded Git library.
+Implemented in `crates/gitrunner` (`ratatoskr-vault-gitrunner`). The primary implementation uses the system Git CLI through `tokio::process::Command` rather than reimplementing backup semantics in an embedded Git library.
 
-Execution requirements:
+Execution requirements, and where each one lives today:
 
-- no shell interpolation;
-- allowlisted commands and arguments;
-- sanitized environment;
-- dedicated Unix user;
-- disabled hooks and user-level Git configuration;
-- bounded wall-clock time;
-- process-group cancellation;
-- disk, CPU, memory, and network limits;
-- path canonicalization and root confinement;
-- structured stdout/stderr capture with secret redaction.
+- no shell interpolation — structural: operations are typed argument vectors; there is no shell on the path from intent to `exec`;
+- allowlisted commands and arguments — a closed `Subcommand` enum gates every spawn before any process starts;
+- sanitized environment — children receive a constructed environment (no inheritance), with system/global Git configuration excluded;
+- dedicated Unix user — deployment concern (container/user isolation), outside the library's scope;
+- disabled hooks and user-level Git configuration — `-c core.hooksPath=/dev/null` plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`;
+- bounded wall-clock time — per-invocation deadline; overruns SIGKILL the child's whole process group through safe `nix` wrappers;
+- process-group cancellation — every child leads its own process group (`process_group(0)`), armed with a kill-on-drop guard;
+- disk, CPU, memory, and network limits — planned with mirror lifecycle quotas (plan item 4);
+- path canonicalization and root confinement — canonicalize-at-use validation against Vault-owned roots; intermediate symlinks leaving a root are refused; mirror paths derive from internal identifiers only;
+- structured stdout/stderr capture with secret redaction — per-stream caps with overflow kills, and captured output scanned against active credential material before it leaves the runner.
+
+Source URLs are validated before use: only `https` and `file` transports are allowed, and option-shaped strings (leading `-`) are refused. Credentials reach Git exclusively through the Git credential-helper contract: the shipped `git-credential-helper` binary reads an owner-only secret file inside an owner-only run directory; secrets never appear in argv or environment, and are deleted when the operation ends.
 
 A typical mirror lifecycle uses:
 
@@ -106,6 +108,8 @@ git fsck --full
 git bundle create --all
 git bundle verify
 ```
+
+The runner implements clone-mirror, fetch-all, fsck-full, rev-list, and show-ref today; remote update --prune and the bundle verbs arrive with mirror lifecycle and snapshots. A failing `fsck` surfaces as a typed integrity failure carrying a bounded diagnostic excerpt, never as a bare exit code.
 
 Git LFS is collected explicitly when policy requires it. An ordinary Git mirror or bundle must not be mislabeled as a complete LFS backup.
 
@@ -316,8 +320,7 @@ process lifecycle and startup or shutdown context.
 
 ## Implementation plan
 
-The authoritative sequence is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Item 1,
-the service foundation, is implemented. Items 2 through 10 remain planned.
+The authoritative sequence is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Items 1–3 (service foundation, desired-state reconciliation, confined Git runner with hostile-repository suite) are implemented. Items 4 through 10 remain planned.
 
 ## Workspace integration
 
@@ -329,6 +332,6 @@ service is unavailable.
 
 ## Project status
 
-The service scaffold (implementation plan item 1) is implemented: `crates/{core,telemetry,persistence,http}` and `services/vault` per the layout in `docs/ARCHITECTURE.md` section 3. The binary loads strict typed configuration from the environment, installs tracing with optional OTLP export, serves the operator health plane on the admin listener, applies `schema.sql` to a fresh database, and stops gracefully on SIGTERM. The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
+Implemented so far: the service foundation (plan item 1: `crates/{core,telemetry,persistence,http}`, `services/vault`, typed configuration, tracing with optional OTLP export, the operator health plane, `schema.sql` applied to a fresh database, graceful SIGTERM shutdown); desired-state reconciliation (plan item 2: delivery validation, deduplicated ingestion, the guarded target state machine, a pure planner, transactional convergence); and the confined Git runner (plan item 3: `crates/gitrunner` with structural command construction, subcommand allowlisting, filesystem confinement, hardened child environments, wall-clock deadlines, output caps, process-group kills, out-of-band credentials via `git-credential-helper`, redacted results, and the deterministic hostile-repository test suite). The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
 
-Not yet implemented: desired-state reconciliation and state machines (plan item 2), the confined Git runner (3), mirror lifecycle (4), snapshots and manifests (5), verification and restore drills (6), off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10). The schema carries their tables as first-version placeholders; no code claims capabilities they do not have.
+Not yet implemented: mirror lifecycle (4), snapshots and manifests (5), verification and restore drills (6), off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10). The schema carries their tables as first-version placeholders; no code claims capabilities they do not have.
