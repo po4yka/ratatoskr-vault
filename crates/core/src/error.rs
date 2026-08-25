@@ -192,3 +192,32 @@ impl core::fmt::Display for FailureClass {
         f.write_str(self.code())
     }
 }
+
+/// The typed error set of Vault's store operations (design D8).
+///
+/// Variants arrive with the features that raise them and are never derived from untrusted data:
+/// a hostile repository name cannot mint a new variant. Domain refusals name their inputs so
+/// callers can distinguish expected conflicts from bugs; [`VaultError::StorageFailed`] keeps
+/// infrastructure detail on the telemetry channel instead of inside the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VaultError {
+    /// A delivered desired-state record failed validation; the named input was refused.
+    InvalidDelivery {
+        /// The rejected field, using the stable delivery-field vocabulary.
+        field: &'static str,
+    },
+    /// A target move the database guard refused: the machine does not allow it.
+    IllegalTransition {
+        /// The status the target had before the refused move.
+        from: String,
+        /// The status the refused move asked for.
+        to: String,
+    },
+    /// A delivery whose `(source, message_id)` pair was already consumed: at-least-once
+    /// transport redelivers, the inbox dedups, and the replay is refused without side effects.
+    DuplicateDelivery,
+    /// An infrastructure failure underneath a store operation: pool, connection, or query
+    /// failure no domain rule names. Details stay on the telemetry channel, never here.
+    StorageFailed,
+}

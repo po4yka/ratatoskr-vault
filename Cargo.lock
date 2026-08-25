@@ -1478,8 +1478,10 @@ dependencies = [
  "ratatoskr-vault-core",
  "ratatoskr-vault-http",
  "ratatoskr-vault-persistence",
+ "sqlx",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
