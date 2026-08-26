@@ -140,6 +140,7 @@ begin
             ('ready',        'excluded'),
             ('ready',        'deleting'),
             ('fetching',     'snapshotting'),
+            ('fetching',     'ready'),
             ('fetching',     'degraded'),
             ('fetching',     'paused'),
             ('fetching',     'excluded'),
@@ -156,6 +157,7 @@ begin
             ('healthy',      'excluded'),
             ('healthy',      'deleting'),
             ('degraded',     'fetching'),
+            ('degraded',     'cloning'),
             ('degraded',     'paused'),
             ('degraded',     'excluded'),
             ('degraded',     'deleting'),
@@ -301,6 +303,58 @@ comment on column git_vault.sync_runs.failure_class is
 create index sync_runs_target_started_idx on git_vault.sync_runs (target_id, started_at desc);
 -- An expired lease is reaped by finding running rows whose expiry has passed.
 create index sync_runs_outcome_lease_idx on git_vault.sync_runs (outcome, lease_expires_at);
+
+-- ---------------------------------------------------------------------------------------------
+-- mirror_lifecycle_runs and mirror_quota_reservations: bounded mirror work evidence
+-- ---------------------------------------------------------------------------------------------
+
+create table git_vault.mirror_lifecycle_runs (
+    run_id          uuid        primary key,
+    target_id       uuid        not null references git_vault.targets (target_id),
+    operation       text        not null,
+    outcome         text        not null,
+    failure_class   text,
+    checkpoint      text,
+    object_count    bigint,
+    bytes_on_disk   bigint,
+    created_at      timestamptz not null,
+
+    constraint mirror_lifecycle_runs_operation_is_known
+        check (operation in ('clone', 'fetch')),
+    constraint mirror_lifecycle_runs_outcome_is_known
+        check (outcome in ('succeeded', 'quota_refused', 'interrupted', 'integrity_failed', 'failed')),
+    constraint mirror_lifecycle_runs_failure_class_is_bounded
+        check (failure_class is null or length(failure_class) between 1 and 64),
+    constraint mirror_lifecycle_runs_checkpoint_is_known
+        check (checkpoint is null or checkpoint in ('clone_pending', 'fetch_pending')),
+    constraint mirror_lifecycle_runs_counts_are_non_negative
+        check ((object_count is null or object_count >= 0)
+            and (bytes_on_disk is null or bytes_on_disk >= 0))
+);
+
+comment on table git_vault.mirror_lifecycle_runs is
+    'Immutable terminal evidence for one bounded clone or fetch operation. Interrupted fetches '
+    'retain a checkpoint; a later run is a new row and never rewrites this evidence.';
+
+create index mirror_lifecycle_runs_target_created_idx
+    on git_vault.mirror_lifecycle_runs (target_id, created_at desc);
+
+create table git_vault.mirror_quota_reservations (
+    run_id          uuid        primary key,
+    target_id       uuid        not null references git_vault.targets (target_id),
+    reserved_bytes  bigint      not null,
+    created_at      timestamptz not null,
+
+    constraint mirror_quota_reservations_bytes_are_positive
+        check (reserved_bytes > 0)
+);
+
+comment on table git_vault.mirror_quota_reservations is
+    'Live byte reservations held only while an admitted mirror operation is running. Terminal '
+    'evidence releases them explicitly; quota refusal never silently prunes stored mirrors.';
+
+create index mirror_quota_reservations_target_idx
+    on git_vault.mirror_quota_reservations (target_id);
 
 -- ---------------------------------------------------------------------------------------------
 -- snapshots: immutable preservation points built from mirrors

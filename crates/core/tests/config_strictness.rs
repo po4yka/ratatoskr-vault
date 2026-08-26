@@ -218,3 +218,36 @@ fn an_absent_database_section_loads_with_no_database() {
     assert_eq!(loaded.admin.bind.to_string(), "127.0.0.1:9570");
     assert_eq!(loaded.telemetry.log_filter, "info");
 }
+
+/// Mirror work is enabled only with finite positive budgets, and the deployment target admits no
+/// more than four simultaneous Git operations on its four CPU cores.
+#[test]
+fn mirror_lifecycle_budget_requires_finite_positive_limits() {
+    let error = config::load_from(
+        config::figment()
+            .merge(Serialized::default(
+                "mirror.root",
+                "/var/lib/ratatoskr/mirrors".to_owned(),
+            ))
+            .merge(Serialized::default(
+                "mirror.work_root",
+                "/var/lib/ratatoskr/work".to_owned(),
+            ))
+            .merge(Serialized::default("mirror.per_mirror_max_bytes", 0_u64))
+            .merge(Serialized::default("mirror.global_max_bytes", 0_u64))
+            .merge(Serialized::default(
+                "mirror.max_concurrent_operations",
+                5_u8,
+            )),
+    )
+    .expect_err("zero budgets and a fifth operation must be rejected");
+
+    let report = error.report();
+    for key in [
+        "mirror.per_mirror_max_bytes",
+        "mirror.global_max_bytes",
+        "mirror.max_concurrent_operations",
+    ] {
+        assert!(report.contains(key), "the report must name {key}\n{report}");
+    }
+}

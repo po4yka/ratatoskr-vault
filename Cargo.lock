@@ -1494,6 +1494,7 @@ name = "ratatoskr-vault"
 version = "0.1.0"
 dependencies = [
  "ratatoskr-vault-core",
+ "ratatoskr-vault-gitrunner",
  "ratatoskr-vault-http",
  "ratatoskr-vault-persistence",
  "sqlx",

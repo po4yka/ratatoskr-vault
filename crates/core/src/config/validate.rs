@@ -71,6 +71,54 @@ pub(crate) fn validate(config: &VaultConfig) -> Vec<Violation> {
 
     found.extend(database_violations(config));
     found.extend(otlp_violations(config));
+    found.extend(mirror_violations(config));
+
+    found
+}
+
+/// V5 — a configured lifecycle has finite positive storage budgets and exactly the host's four
+/// execution permits. There is no "unlimited" safety fallback: absence disables lifecycle work.
+fn mirror_violations(config: &VaultConfig) -> Vec<Violation> {
+    let mut found = Vec::new();
+    let Some(mirror) = config.mirror.as_ref() else {
+        return found;
+    };
+
+    if !mirror.root.is_absolute() {
+        found.push(Violation {
+            key: "mirror.root",
+            env_var: "RATATOSKR__MIRROR__ROOT",
+            rule: "must be an absolute confined storage root",
+        });
+    }
+    if !mirror.work_root.is_absolute() || mirror.work_root == mirror.root {
+        found.push(Violation {
+            key: "mirror.work_root",
+            env_var: "RATATOSKR__MIRROR__WORK_ROOT",
+            rule: "must be an absolute staging root distinct from mirror.root",
+        });
+    }
+    if mirror.per_mirror_max_bytes == 0 {
+        found.push(Violation {
+            key: "mirror.per_mirror_max_bytes",
+            env_var: "RATATOSKR__MIRROR__PER_MIRROR_MAX_BYTES",
+            rule: "must be a positive finite byte budget",
+        });
+    }
+    if mirror.global_max_bytes == 0 {
+        found.push(Violation {
+            key: "mirror.global_max_bytes",
+            env_var: "RATATOSKR__MIRROR__GLOBAL_MAX_BYTES",
+            rule: "must be a positive finite byte budget",
+        });
+    }
+    if mirror.max_concurrent_operations != 4 {
+        found.push(Violation {
+            key: "mirror.max_concurrent_operations",
+            env_var: "RATATOSKR__MIRROR__MAX_CONCURRENT_OPERATIONS",
+            rule: "must equal 4, the deployment target's four CPU cores",
+        });
+    }
 
     found
 }

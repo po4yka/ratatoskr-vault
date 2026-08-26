@@ -6,5 +6,6 @@
 pub mod config;
 pub mod delivery;
 pub mod error;
+pub mod mirror;
 pub mod planner;
 pub mod target_state;

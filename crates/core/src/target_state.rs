@@ -82,7 +82,7 @@ pub struct Transition {
 
 impl Transition {
     /// Every legal move of the design matrix, as `(from, to)` pairs.
-    const TRANSITIONS: [(TargetStatus, TargetStatus); 37] = [
+    const TRANSITIONS: [(TargetStatus, TargetStatus); 39] = [
         (TargetStatus::Requested, TargetStatus::Cloning),
         (TargetStatus::Requested, TargetStatus::Excluded),
         (TargetStatus::Requested, TargetStatus::Deleting),
@@ -96,6 +96,7 @@ impl Transition {
         (TargetStatus::Ready, TargetStatus::Excluded),
         (TargetStatus::Ready, TargetStatus::Deleting),
         (TargetStatus::Fetching, TargetStatus::Snapshotting),
+        (TargetStatus::Fetching, TargetStatus::Ready),
         (TargetStatus::Fetching, TargetStatus::Degraded),
         (TargetStatus::Fetching, TargetStatus::Paused),
         (TargetStatus::Fetching, TargetStatus::Excluded),
@@ -112,6 +113,7 @@ impl Transition {
         (TargetStatus::Healthy, TargetStatus::Excluded),
         (TargetStatus::Healthy, TargetStatus::Deleting),
         (TargetStatus::Degraded, TargetStatus::Fetching),
+        (TargetStatus::Degraded, TargetStatus::Cloning),
         (TargetStatus::Degraded, TargetStatus::Paused),
         (TargetStatus::Degraded, TargetStatus::Excluded),
         (TargetStatus::Degraded, TargetStatus::Deleting),
@@ -175,6 +177,7 @@ mod tests {
             (TargetStatus::Ready, TargetStatus::Excluded),
             (TargetStatus::Ready, TargetStatus::Deleting),
             (TargetStatus::Fetching, TargetStatus::Snapshotting),
+            (TargetStatus::Fetching, TargetStatus::Ready),
             (TargetStatus::Fetching, TargetStatus::Degraded),
             (TargetStatus::Fetching, TargetStatus::Paused),
             (TargetStatus::Fetching, TargetStatus::Excluded),
@@ -191,6 +194,7 @@ mod tests {
             (TargetStatus::Healthy, TargetStatus::Excluded),
             (TargetStatus::Healthy, TargetStatus::Deleting),
             (TargetStatus::Degraded, TargetStatus::Fetching),
+            (TargetStatus::Degraded, TargetStatus::Cloning),
             (TargetStatus::Degraded, TargetStatus::Paused),
             (TargetStatus::Degraded, TargetStatus::Excluded),
             (TargetStatus::Degraded, TargetStatus::Deleting),
@@ -200,7 +204,7 @@ mod tests {
             (TargetStatus::Excluded, TargetStatus::Requested),
             (TargetStatus::Excluded, TargetStatus::Deleting),
         ];
-        assert_eq!(legal_pairs.len(), 37);
+        assert_eq!(legal_pairs.len(), 39);
 
         let all_ordered_pairs: Vec<_> = TargetStatus::ALL
             .iter()

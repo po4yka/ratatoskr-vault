@@ -1,8 +1,9 @@
 # Ratatoskr Vault Architecture
 
 > Status: target architecture. The Rust service foundation, operator health plane, current
-> `git_vault` schema, and CI gate are implemented. Reconciliation, Git execution, storage,
-> verification, restore, retention, and the remaining sections are planned.
+> `git_vault` schema, CI gate, reconciliation, confined Git execution, and local mirror lifecycle
+> are implemented. Snapshots, restore, retention, off-host storage, and the remaining sections
+> are planned.
 
 ## 1. Purpose
 
@@ -234,17 +235,26 @@ git clone --mirror <source> <target>
 -> record mirror metadata
 ```
 
+Implemented lifecycle boundary: the clone first reserves finite per-mirror and global capacity,
+writes only to `work/runs/<run-id>/`, and renames the checked bare mirror into its identifier-derived
+published path. Refusal writes quota evidence and degrades the target without pruning. Cancellation
+removes only that run-owned staging tree and records `clone_pending`.
+
 ### 8.2. Update
 
 ```text
-git remote update --prune
+git fetch <source> +refs/*:refs/*
 -> capture changed refs
 -> git fsck --full
 -> update mirror observation
 -> decide whether a new snapshot is required
 ```
 
-Updates use a per-target lease so two workers cannot mutate one mirror concurrently.
+Updates use a per-target lease so two workers cannot mutate one mirror concurrently. The current
+single-host executor also has one shared four-permit limit, aligned to the deployment target's four
+CPU cores. An interrupted fetch never removes the published mirror; it records `fetch_pending` and
+the next normal cycle retries fetch. Every clone and fetch runs fsck, show-ref, and object-count
+sanity checks; failed checks mark the target degraded and preserve the last successful observation.
 
 ### 8.3. Mirror layout
 

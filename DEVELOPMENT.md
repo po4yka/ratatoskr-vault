@@ -1,9 +1,9 @@
 # Developing Ratatoskr Vault
 
-> Status: Implemented (foundation, reconciliation, confined Git runner)  
+> Status: Implemented (foundation, reconciliation, confined Git runner, local mirror lifecycle)
 > Last reviewed: 2026-08-25
 
-The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, and `crates/gitrunner` executes the system Git binary under structural confinement with its generated hostile-repository suite. Mirror workers, snapshots, retention, off-host storage, and eventing are later implementation plan items and do not exist yet.
+The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Snapshots, retention, off-host storage, and eventing are later implementation plan items and do not exist yet.
 
 ## Toolchain
 
@@ -94,6 +94,18 @@ git -c credential.helper=<path-to-git-credential-helper> <secret-file-path> fetc
 The helper binary (`ratatoskr-vault-gitrunner` ships it as `git-credential-helper`) reads an owner-only secret file inside an owner-only run directory and answers the credential protocol on stdout. Secrets never appear in argv or environment blocks; captured output is scanned against active secret material before leaving the runner; the secret file is deleted when the operation ends. The trade-off — a brief `0600` file instead of fd passing — is recorded in the change design because fd inheritance beyond stdio is not expressible under the `unsafe` ban.
 
 LFS collection, BlobStore placement, bundle verbs, and restore drills are later plan items and have no commands here yet; until then the architecture intent lives in `docs/ARCHITECTURE.md` sections 7–14.
+
+## Local mirror lifecycle (plan item 4)
+
+Set the `RATATOSKR__MIRROR__*` section only on a host that may execute mirror work. It requires two
+distinct absolute roots, positive finite per-mirror and global byte budgets, and exactly four
+concurrent-operation permits — the Pi deployment target has four CPU cores. Each operation takes
+a durable reservation before Git starts. Refusal marks the target degraded and creates evidence;
+it never prunes existing data. Initial clones use `WORK_ROOT/runs/<run-id>/` and rename only a
+verified bare repository into `ROOT/mirrors/<shard>/<target-id>.git`. Cancellation cleans that
+owned staging directory. Fetch cancellation retains the previous mirror and records a resumable
+`fetch_pending` checkpoint. Clone and fetch both run fsck, show-ref, and object enumeration; an
+integrity failure degrades the target without overwriting its prior successful observation.
 
 ## Tests
 

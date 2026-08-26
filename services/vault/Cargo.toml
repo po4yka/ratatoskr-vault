@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 ratatoskr-vault-core.workspace     = true
+ratatoskr-vault-gitrunner.workspace = true
 ratatoskr-vault-http.workspace     = true
 ratatoskr-vault-persistence.workspace = true
 tokio.workspace                    = true

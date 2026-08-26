@@ -2,7 +2,7 @@
 
 `ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
-> **Status:** foundation and confined Git execution implemented. A Rust workspace runs the `ratatoskr-vault` deployable with typed configuration, structured telemetry, an operator health plane (`/health/live`, `/health/ready`, `/metrics`, `/version`), the first version of the `git_vault` PostgreSQL schema (`schema.sql`, applied in place — no migrations), desired-state reconciliation with a guarded target state machine, and `crates/gitrunner`, the confined system-Git runner with its generated hostile-repository suite. No mirror worker, snapshot format, storage backend, or restore verifier exists yet; those are implementation plan items 4–10 in `docs/IMPLEMENTATION_PLAN.md`.
+> **Status:** foundation, confined Git execution, and the local mirror lifecycle are implemented. The lifecycle clones into target-owned staging, atomically publishes only after integrity checks, and periodically fetches an existing bare mirror. It records finite quota admission, terminal run evidence, checkpoints on interruption, and post-operation object evidence. Snapshots, LFS collection, off-host copies, and restore verification remain later plan items.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -93,7 +93,9 @@ Execution requirements, and where each one lives today:
 - disabled hooks and user-level Git configuration — `-c core.hooksPath=/dev/null` plus `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`;
 - bounded wall-clock time — per-invocation deadline; overruns SIGKILL the child's whole process group through safe `nix` wrappers;
 - process-group cancellation — every child leads its own process group (`process_group(0)`), armed with a kill-on-drop guard;
-- disk, CPU, memory, and network limits — planned with mirror lifecycle quotas (plan item 4);
+- finite per-mirror and global byte reservations — an over-budget clone/fetch is refused and
+  marked degraded; Vault never silently prunes a mirror to make room;
+- four shared clone/fetch permits — matched to the target host's four CPU cores;
 - path canonicalization and root confinement — canonicalize-at-use validation against Vault-owned roots; intermediate symlinks leaving a root are refused; mirror paths derive from internal identifiers only;
 - structured stdout/stderr capture with secret redaction — per-stream caps with overflow kills, and captured output scanned against active credential material before it leaves the runner.
 
@@ -109,7 +111,11 @@ git bundle create --all
 git bundle verify
 ```
 
-The runner implements clone-mirror, fetch-all, fsck-full, rev-list, and show-ref today; remote update --prune and the bundle verbs arrive with mirror lifecycle and snapshots. A failing `fsck` surfaces as a typed integrity failure carrying a bounded diagnostic excerpt, never as a bare exit code.
+The lifecycle uses clone-mirror, fetch-all, fsck-full, rev-list, and show-ref. A clone publishes by
+atomic rename only after fsck, refs, and object-count checks pass. A cancelled clone removes only
+its run-owned staging directory; a cancelled fetch leaves the prior bare mirror intact and records
+a `fetch_pending` checkpoint for the normal next fetch. A failing fsck surfaces as a typed
+integrity failure and degrades the target without replacing the prior successful observation.
 
 Git LFS is collected explicitly when policy requires it. An ordinary Git mirror or bundle must not be mislabeled as a complete LFS backup.
 

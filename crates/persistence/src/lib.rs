@@ -13,6 +13,8 @@
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+mod mirror_lifecycle;
+
 use std::time::Duration;
 
 use ratatoskr_vault_core::delivery::ValidatedDelivery;
@@ -22,6 +24,8 @@ use secrecy::ExposeSecret as _;
 use sqlx::error::DatabaseError;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use uuid::Uuid;
+
+pub use crate::mirror_lifecycle::QuotaReservationOutcome;
 
 /// The schema, embedded at compile time.
 ///

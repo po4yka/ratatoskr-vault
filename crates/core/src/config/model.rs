@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 
 use secrecy::SecretString;
 use url::Url;
@@ -31,6 +32,13 @@ pub struct VaultConfig {
     /// The two phases of a graceful stop.
     pub shutdown: ShutdownConfig,
 
+    /// Local mirror storage and the finite admission budgets for Git work.
+    ///
+    /// A process can serve its operator plane without this section, but it cannot run a mirror
+    /// lifecycle until an operator deliberately supplies both confined roots and both budgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<MirrorLifecycleConfig>,
+
     /// Logging, filtering and span export.
     pub telemetry: TelemetryConfig,
 }
@@ -50,6 +58,7 @@ impl VaultConfig {
                 drain_seconds: default_drain_seconds(),
                 grace_seconds: default_grace_seconds(),
             },
+            mirror: None,
             telemetry: TelemetryConfig {
                 log_format: LogFormat::default(),
                 log_filter: default_log_filter(),
@@ -128,6 +137,31 @@ pub struct ShutdownConfig {
     /// Seconds allowed for in-flight requests after the listener stops accepting.
     #[serde(default = "default_grace_seconds")]
     pub grace_seconds: u64,
+}
+
+/// The roots and byte budgets that make mirror work safe on the single deployment host.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MirrorLifecycleConfig {
+    /// `RATATOSKR__MIRROR__ROOT`: the absolute root whose `mirrors/` descendants Vault owns.
+    pub root: PathBuf,
+
+    /// `RATATOSKR__MIRROR__WORK_ROOT`: a separate absolute root for owned clone staging.
+    pub work_root: PathBuf,
+
+    /// `RATATOSKR__MIRROR__PER_MIRROR_MAX_BYTES`: positive ceiling for one mirror.
+    pub per_mirror_max_bytes: u64,
+
+    /// `RATATOSKR__MIRROR__GLOBAL_MAX_BYTES`: positive ceiling across all mirrors.
+    pub global_max_bytes: u64,
+
+    /// `RATATOSKR__MIRROR__MAX_CONCURRENT_OPERATIONS`: exactly four on the four-core host.
+    #[serde(default = "default_max_concurrent_mirror_operations")]
+    pub max_concurrent_operations: u8,
+}
+
+const fn default_max_concurrent_mirror_operations() -> u8 {
+    4
 }
 
 /// Logging and span export.
