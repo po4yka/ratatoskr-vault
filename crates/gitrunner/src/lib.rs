@@ -150,8 +150,10 @@ impl GitRunner {
         }
 
         // HOME must exist before the child starts; Git only reads it, but a missing home makes
-        // some helpers misbehave. Created best-effort inside confinement.
-        let _ignored = std::fs::create_dir_all(&self.config.run_home);
+        // some helpers misbehave. Created best-effort inside confinement, owner-only from the
+        // moment it exists because this same directory goes on to hold staged credential
+        // material for operations that carry credentials.
+        let _ignored = credentials::create_private_dir_all(&self.config.run_home);
 
         // Credential staging happens before anything else that can fail differently, so the
         // cleanup guard covers every later path by construction.

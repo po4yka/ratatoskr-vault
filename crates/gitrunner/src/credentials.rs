@@ -31,6 +31,33 @@ impl Credentials {
     }
 }
 
+/// Creates `dir` (and any missing ancestors) owner-only from the moment it exists.
+///
+/// A directory that is about to hold or sit above credential material must never pass through a
+/// window where the ambient umask decides its permissions: on a default `022` umask, a bare
+/// `create_dir_all` leaves it group- and world-readable until something chmods it after the
+/// fact, and a hostile local process can read it inside that window. Requesting mode `0700`
+/// directly on the creating `mkdir` closes that window; an already-existing directory is left
+/// untouched by this call; the leftover requested mode also has no group/other bits for any
+/// ordinary umask to widen.
+///
+/// On non-Unix targets this degrades to a plain recursive create with no mode guarantee, matching
+/// this crate's existing `#[cfg(unix)]`-gated permission handling elsewhere.
+pub(crate) fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 /// Writes `credentials` into a fresh `0600` file named after a fresh UUID inside `run_dir`.
 ///
 /// The caller must hold the returned path alive only as long as the operation and drop
@@ -46,10 +73,13 @@ pub(crate) fn prepare_secret_file(
 ) -> Result<PathBuf, crate::error::GitRunnerError> {
     use crate::error::GitRunnerError;
 
-    std::fs::create_dir_all(run_dir).map_err(|source| GitRunnerError::CredentialWriteFailed {
+    create_private_dir_all(run_dir).map_err(|source| GitRunnerError::CredentialWriteFailed {
         reason: format!("run directory {} unusable: {source}", run_dir.display()),
     })?;
 
+    // Defense in depth for a directory this call did not create itself: an operator-supplied
+    // run directory that already existed before this run, with permissions this crate never
+    // chose, is refused rather than trusted.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
