@@ -34,7 +34,7 @@ async fn healthy_fixture_mirror_produces_complete_immutable_restorable_bundle_ev
     )
     .unwrap();
     let snapshot = lifecycle
-        .snapshot(request, &mirror)
+        .snapshot(request, &mirror, None)
         .await
         .expect("snapshot must publish");
 
@@ -98,7 +98,7 @@ async fn publication_failure_preserves_the_last_healthy_mirror_observation() {
         LocalBlobStore::new(root.join("blobs"), 1).unwrap(),
     )
     .unwrap();
-    let result = lifecycle.snapshot(request, &mirror).await;
+    let result = lifecycle.snapshot(request, &mirror, None).await;
     assert!(
         result.is_err(),
         "a BlobStore refusal must fail the snapshot"

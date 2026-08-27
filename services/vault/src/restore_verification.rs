@@ -1,5 +1,6 @@
 //! Scheduled verification admission and isolated restore-drill execution.
 
+mod artifact;
 mod durable;
 mod replica;
 use std::path::PathBuf;
@@ -7,8 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use ratatoskr_vault_blobstore::{BlobStoreError, LocalBlobStore};
 use ratatoskr_vault_core::snapshot::{
-    BlobRef, ManifestError, ManifestVerificationKey, RefEvidence, SnapshotManifest,
-    canonical_ref_digest, verify_manifest_chain,
+    BlobRef, ManifestVerificationKey, RefEvidence, SnapshotManifest, canonical_ref_digest,
 };
 use ratatoskr_vault_gitrunner::{
     ConfinedPath, GitOperation, GitRunner, GitRunnerError, RunConfig, RunOutcome, Subcommand,
@@ -41,6 +41,8 @@ pub enum VerificationFailure {
     RefMismatch,
     /// The selected replica could not supply verified bytes within its finite bounds.
     ReplicaUnavailable,
+    /// Required Git LFS bytes were absent, corrupt, or disagreed with the manifest.
+    LfsInvalid,
 }
 /// Operator policy for choosing drill bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +151,12 @@ pub struct VerificationReport {
     pub expected_ref_count: usize,
     /// Canonical manifest ref-set digest.
     pub expected_ref_set_sha256: String,
+    /// Manifest LFS object count when LFS is required.
+    pub expected_lfs_object_count: Option<usize>,
+    /// Manifest LFS byte total when LFS is required.
+    pub expected_lfs_bytes: Option<u64>,
+    /// Manifest canonical LFS aggregate digest when required.
+    pub expected_lfs_aggregate_sha256: Option<String>,
 }
 
 /// Trusted filesystem and process bounds for restore drills.
@@ -211,6 +219,20 @@ pub struct RestoreDrillReport {
     pub network_disabled: bool,
     /// Must remain false: the live mirror root is a denied operand root.
     pub live_mirror_accessed: bool,
+    /// Null for Git-only snapshots; otherwise whether every LFS object was restored.
+    pub lfs_restored: Option<bool>,
+    /// Manifest LFS object count.
+    pub expected_lfs_object_count: Option<usize>,
+    /// Materialized verified LFS object count.
+    pub observed_lfs_object_count: Option<usize>,
+    /// Manifest total LFS bytes.
+    pub expected_lfs_bytes: Option<u64>,
+    /// Materialized verified LFS bytes.
+    pub observed_lfs_bytes: Option<u64>,
+    /// Manifest aggregate digest.
+    pub expected_lfs_aggregate_sha256: Option<String>,
+    /// Recomputed aggregate digest after materialization.
+    pub observed_lfs_aggregate_sha256: Option<String>,
 }
 
 /// Reconstructs a repository from a stored bundle under finite confinement.
@@ -291,15 +313,16 @@ impl RestoreDrill {
     ) -> DrillResult {
         let mut stages = Vec::new();
         if verification.outcome != ReportOutcome::Passed {
-            return Err((stages, VerificationFailure::BundleInvalid, Vec::new()));
+            return Err((stages, VerificationFailure::BundleInvalid, Vec::new(), None));
         }
         let evidence = Self::load_manifest(store, &verification.manifest)
-            .map_err(|failure| (stages.clone(), failure, Vec::new()))?;
+            .map_err(|failure| (stages.clone(), failure, Vec::new(), None))?;
         let bundle = evidence.bundles.first().ok_or_else(|| {
             (
                 stages.clone(),
                 VerificationFailure::BundleInvalid,
                 Vec::new(),
+                None,
             )
         })?;
         store.verify(bundle).map_err(|_| {
@@ -307,6 +330,7 @@ impl RestoreDrill {
                 stages.clone(),
                 VerificationFailure::HashMismatch,
                 Vec::new(),
+                None,
             )
         })?;
         std::fs::create_dir_all(run_root).map_err(|_| {
@@ -314,6 +338,7 @@ impl RestoreDrill {
                 stages.clone(),
                 VerificationFailure::IsolationFailed,
                 Vec::new(),
+                None,
             )
         })?;
         let relative_bundle = store
@@ -328,6 +353,7 @@ impl RestoreDrill {
                     stages.clone(),
                     VerificationFailure::IsolationFailed,
                     Vec::new(),
+                    None,
                 )
             })?;
         let bundle_path = ConfinedPath::new(store.root(), &relative_bundle).map_err(|_| {
@@ -335,6 +361,7 @@ impl RestoreDrill {
                 stages.clone(),
                 VerificationFailure::IsolationFailed,
                 Vec::new(),
+                None,
             )
         })?;
         let runner = self.runner(run_root);
@@ -357,7 +384,7 @@ impl RestoreDrill {
         let refs =
             run_git_stage(&runner, GitOperation::show_ref(), "show_ref", &mut stages).await?;
         let observed = parse_ref_output(&refs.stdout)
-            .map_err(|failure| (stages.clone(), failure, Vec::new()))?;
+            .map_err(|failure| (stages.clone(), failure, Vec::new(), None))?;
         let compare_started = std::time::Instant::now();
         let matches = observed == evidence.refs;
         stages.push(StageReport {
@@ -366,10 +393,69 @@ impl RestoreDrill {
             duration: compare_started.elapsed(),
         });
         if matches {
-            Ok((stages, observed))
+            let restored_lfs =
+                Self::materialize_lfs(store, run_root, evidence.lfs.as_ref(), &mut stages)
+                    .map_err(|failure| (stages.clone(), failure, observed.clone(), None))?;
+            Ok((stages, observed, restored_lfs))
         } else {
-            Err((stages, VerificationFailure::RefMismatch, observed))
+            Err((stages, VerificationFailure::RefMismatch, observed, None))
         }
+    }
+
+    fn materialize_lfs(
+        store: &LocalBlobStore,
+        repository: &std::path::Path,
+        evidence: Option<&ratatoskr_vault_core::snapshot::LfsEvidence>,
+        stages: &mut Vec<StageReport>,
+    ) -> Result<Option<RestoredLfs>, VerificationFailure> {
+        let Some(evidence) = evidence else {
+            return Ok(None);
+        };
+        let started = std::time::Instant::now();
+        let result = (|| {
+            for object in &evidence.objects {
+                store
+                    .verify(&object.blob)
+                    .map_err(|_| VerificationFailure::LfsInvalid)?;
+                let source = store
+                    .resolve(&object.blob)
+                    .map_err(|_| VerificationFailure::LfsInvalid)?;
+                let first: String = object.oid.chars().take(2).collect();
+                let second: String = object.oid.chars().skip(2).take(2).collect();
+                let destination = repository
+                    .join("lfs/objects")
+                    .join(first)
+                    .join(second)
+                    .join(&object.oid);
+                let parent = destination
+                    .parent()
+                    .ok_or(VerificationFailure::IsolationFailed)?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|_| VerificationFailure::IsolationFailed)?;
+                let mut input =
+                    std::fs::File::open(source).map_err(|_| VerificationFailure::LfsInvalid)?;
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(destination)
+                    .map_err(|_| VerificationFailure::IsolationFailed)?;
+                std::io::copy(&mut input, &mut output)
+                    .map_err(|_| VerificationFailure::IsolationFailed)?;
+            }
+            Ok(RestoredLfs {
+                object_count: evidence.objects.len(),
+                total_bytes: evidence.total_bytes,
+                aggregate_sha256: ratatoskr_vault_core::snapshot::canonical_lfs_digest(
+                    &evidence.objects,
+                ),
+            })
+        })();
+        stages.push(StageReport {
+            stage: "lfs_objects",
+            passed: result.is_ok(),
+            duration: started.elapsed(),
+        });
+        result.map(Some)
     }
 
     fn load_manifest(
@@ -408,9 +494,21 @@ impl RestoreDrill {
 }
 
 type DrillResult = Result<
-    (Vec<StageReport>, Vec<RefEvidence>),
-    (Vec<StageReport>, VerificationFailure, Vec<RefEvidence>),
+    (Vec<StageReport>, Vec<RefEvidence>, Option<RestoredLfs>),
+    (
+        Vec<StageReport>,
+        VerificationFailure,
+        Vec<RefEvidence>,
+        Option<RestoredLfs>,
+    ),
 >;
+
+#[derive(Debug, Clone)]
+struct RestoredLfs {
+    object_count: usize,
+    total_bytes: u64,
+    aggregate_sha256: String,
+}
 
 fn build_drill_report(
     drill_id: Uuid,
@@ -420,9 +518,9 @@ fn build_drill_report(
     duration: Duration,
     result: DrillResult,
 ) -> RestoreDrillReport {
-    let (stages, observed_refs, failure) = match result {
-        Ok((stages, refs)) => (stages, refs, None),
-        Err((stages, failure, refs)) => (stages, refs, Some(failure)),
+    let (stages, observed_refs, restored_lfs, failure) = match result {
+        Ok((stages, refs, lfs)) => (stages, refs, lfs, None),
+        Err((stages, failure, refs, lfs)) => (stages, refs, lfs, Some(failure)),
     };
     let observed_ref_set_sha256 = canonical_ref_digest(&observed_refs);
     RestoreDrillReport {
@@ -446,6 +544,17 @@ fn build_drill_report(
         observed_ref_set_sha256,
         network_disabled: true,
         live_mirror_accessed: false,
+        lfs_restored: verification.expected_lfs_object_count.map(|expected| {
+            restored_lfs
+                .as_ref()
+                .is_some_and(|value| value.object_count == expected)
+        }),
+        expected_lfs_object_count: verification.expected_lfs_object_count,
+        observed_lfs_object_count: restored_lfs.as_ref().map(|value| value.object_count),
+        expected_lfs_bytes: verification.expected_lfs_bytes,
+        observed_lfs_bytes: restored_lfs.as_ref().map(|value| value.total_bytes),
+        expected_lfs_aggregate_sha256: verification.expected_lfs_aggregate_sha256.clone(),
+        observed_lfs_aggregate_sha256: restored_lfs.map(|value| value.aggregate_sha256),
     }
 }
 
@@ -458,7 +567,15 @@ async fn run_git_stage(
     operation: GitOperation,
     stage: &'static str,
     stages: &mut Vec<StageReport>,
-) -> Result<RunOutcome, (Vec<StageReport>, VerificationFailure, Vec<RefEvidence>)> {
+) -> Result<
+    RunOutcome,
+    (
+        Vec<StageReport>,
+        VerificationFailure,
+        Vec<RefEvidence>,
+        Option<RestoredLfs>,
+    ),
+> {
     let started = std::time::Instant::now();
     let result = runner.run(&operation).await;
     let passed = result.as_ref().is_ok_and(|outcome| outcome.exit_code == 0);
@@ -473,11 +590,13 @@ async fn run_git_stage(
             stages.clone(),
             VerificationFailure::IsolationFailed,
             Vec::new(),
+            None,
         )),
         Ok(_) | Err(_) => Err((
             stages.clone(),
             VerificationFailure::BundleInvalid,
             Vec::new(),
+            None,
         )),
     }
 }
@@ -504,175 +623,6 @@ pub struct ArtifactVerifier {
     store: LocalBlobStore,
     trusted_keys: Vec<ManifestVerificationKey>,
     max_chain_depth: usize,
-}
-
-impl ArtifactVerifier {
-    /// Creates a verifier with an explicit trust set and finite chain bound.
-    #[must_use]
-    pub const fn new(
-        store: LocalBlobStore,
-        trusted_keys: Vec<ManifestVerificationKey>,
-        max_chain_depth: usize,
-    ) -> Self {
-        Self {
-            store,
-            trusted_keys,
-            max_chain_depth,
-        }
-    }
-
-    /// Produces a terminal report for the supplied immutable manifest.
-    #[must_use]
-    pub fn verify(&self, snapshot_id: Uuid, manifest: BlobRef) -> VerificationReport {
-        let started_at = SystemTime::now();
-        let started = std::time::Instant::now();
-        let mut stages = Vec::new();
-        if self
-            .record_blob_check(&manifest, "manifest_hash", &mut stages)
-            .is_err()
-        {
-            return terminal_verification_report(
-                snapshot_id,
-                manifest,
-                started_at,
-                started,
-                stages,
-                Vec::new(),
-                None,
-                VerificationFailure::HashMismatch,
-            );
-        }
-        let Ok(evidence) = self.load_manifest(&manifest) else {
-            return terminal_verification_report(
-                snapshot_id,
-                manifest,
-                started_at,
-                started,
-                stages,
-                Vec::new(),
-                None,
-                VerificationFailure::ManifestInvalid,
-            );
-        };
-        let chain_started = std::time::Instant::now();
-        let chain = verify_manifest_chain(
-            &manifest,
-            &self.trusted_keys,
-            self.max_chain_depth,
-            |reference| self.load_manifest(reference),
-        );
-        stages.push(StageReport {
-            stage: "manifest_chain",
-            passed: chain.is_ok(),
-            duration: chain_started.elapsed(),
-        });
-        if chain.is_err() {
-            return terminal_verification_report(
-                snapshot_id,
-                manifest,
-                started_at,
-                started,
-                stages,
-                Vec::new(),
-                Some(&evidence),
-                VerificationFailure::ManifestInvalid,
-            );
-        }
-        let mut checked_artifacts = Vec::new();
-        for bundle in &evidence.bundles {
-            checked_artifacts.push(bundle.clone());
-            if self
-                .record_blob_check(bundle, "bundle_hash", &mut stages)
-                .is_err()
-            {
-                return terminal_verification_report(
-                    snapshot_id,
-                    manifest,
-                    started_at,
-                    started,
-                    stages,
-                    checked_artifacts,
-                    Some(&evidence),
-                    VerificationFailure::HashMismatch,
-                );
-            }
-        }
-        VerificationReport {
-            verification_id: Uuid::now_v7(),
-            snapshot_id,
-            manifest,
-            started_at,
-            finished_at: SystemTime::now(),
-            duration: started.elapsed(),
-            outcome: ReportOutcome::Passed,
-            failure: None,
-            stages,
-            checked_artifacts,
-            expected_ref_count: evidence.refs.len(),
-            expected_ref_set_sha256: evidence.ref_set_sha256,
-        }
-    }
-
-    fn record_blob_check(
-        &self,
-        reference: &BlobRef,
-        stage: &'static str,
-        stages: &mut Vec<StageReport>,
-    ) -> Result<(), BlobStoreError> {
-        let started = std::time::Instant::now();
-        let result = self.store.verify(reference);
-        stages.push(StageReport {
-            stage,
-            passed: result.is_ok(),
-            duration: started.elapsed(),
-        });
-        result
-    }
-
-    fn load_manifest(&self, reference: &BlobRef) -> Result<SnapshotManifest, ManifestError> {
-        self.store
-            .verify(reference)
-            .map_err(|_| ManifestError::MissingManifest)?;
-        let path = self
-            .store
-            .resolve(reference)
-            .map_err(|_| ManifestError::MissingManifest)?;
-        let bytes = std::fs::read(path).map_err(|_| ManifestError::MissingManifest)?;
-        serde_json::from_slice(&bytes).map_err(|_| ManifestError::Serialization)
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "terminal report construction carries every immutable evidence field explicitly"
-)]
-fn terminal_verification_report(
-    snapshot_id: Uuid,
-    manifest: BlobRef,
-    started_at: SystemTime,
-    started: std::time::Instant,
-    stages: Vec<StageReport>,
-    checked_artifacts: Vec<BlobRef>,
-    evidence: Option<&SnapshotManifest>,
-    failure: VerificationFailure,
-) -> VerificationReport {
-    VerificationReport {
-        verification_id: Uuid::now_v7(),
-        snapshot_id,
-        manifest,
-        started_at,
-        finished_at: SystemTime::now(),
-        duration: started.elapsed(),
-        outcome: ReportOutcome::Failed,
-        failure: Some(failure),
-        stages,
-        checked_artifacts,
-        expected_ref_count: evidence.map_or(0, |value| value.refs.len()),
-        expected_ref_set_sha256: evidence.map_or_else(
-            || canonical_ref_digest(&[]),
-            |value| value.ref_set_sha256.clone(),
-        ),
-    }
 }
 
 /// Finite scheduling and execution budgets for verification work.

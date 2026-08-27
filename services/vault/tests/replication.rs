@@ -35,6 +35,7 @@ async fn unreachable_replica_leaves_local_snapshot_and_verification_admissible()
             &bundle,
             &manifest,
             &"a".repeat(64),
+            None,
         )
         .await
         .expect("snapshot evidence");
@@ -114,6 +115,7 @@ async fn shutdown_deadline_leaves_an_owned_attempt_recoverable() {
             &bundle,
             &manifest,
             &"b".repeat(64),
+            None,
         )
         .await
         .expect("snapshot evidence");

@@ -1,9 +1,9 @@
 # Developing Ratatoskr Vault
 
-> Status: Implemented (foundation through verified S3-compatible off-host replicas)
+> Status: Implemented (foundation through Git LFS and wiki sibling preservation)
 > Last reviewed: 2026-08-27
 
-The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots, signed manifests, scheduled stored-byte verification, isolated restore drills, and verified S3-compatible replicas are implemented. Retention, remote deletion/lifecycle management, and event publication remain later plan items.
+The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes system Git and Git LFS binaries under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite combined byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots, signed manifests, scheduled stored-byte verification, isolated Git/LFS restore drills, verified S3-compatible replicas, and independently mirrored wiki sibling targets are implemented. Provider-API auxiliary collectors remain separately approval-gated and absent. Retention, remote deletion/lifecycle management, and event publication remain later plan items.
 
 ## Toolchain
 
@@ -93,7 +93,14 @@ git -c credential.helper=<path-to-git-credential-helper> <secret-file-path> fetc
 
 The helper binary (`ratatoskr-vault-gitrunner` ships it as `git-credential-helper`) reads an owner-only secret file inside an owner-only run directory and answers the credential protocol on stdout. Secrets never appear in argv or environment blocks; captured output is scanned against active secret material before leaving the runner; the secret file is deleted when the operation ends. The trade-off — a brief `0600` file instead of fd passing — is recorded in the change design because fd inheritance beyond stdio is not expressible under the `unsafe` ban.
 
-LFS collection remains a later plan item. Local bundle creation uses the typed `git bundle create <confined-output> --all` operation and streams completed staging artifacts into Vault-owned content-addressed BlobStore storage. Restore adds only typed `init --bare`, local `bundle verify`, local bundle fetch, `fsck --full`, and `show-ref` operations; it enables only the `file` transport and denies the live-mirror root before process spawn.
+LFS-enabled targets additionally use the absolute configured `git-lfs` binary through closed
+version/fetch-all/list-all-long/fsck operations, a constructed environment, run-owned staging,
+finite object/byte/deadline limits, and content-addressed object publication. Git-only targets never
+spawn LFS. Local bundle creation uses the typed `git bundle create <confined-output> --all`
+operation and streams completed staging artifacts into Vault-owned content-addressed BlobStore
+storage. Restore adds only typed `init --bare`, local `bundle verify`, local bundle fetch,
+`fsck --full`, `show-ref`, and verified LFS materialization; it enables only the `file` transport and
+denies the source and live-mirror roots before process spawn.
 
 ## Verification and restore drills (plan item 6)
 

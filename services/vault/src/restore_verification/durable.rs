@@ -162,6 +162,17 @@ fn stored_drill(report: &RestoreDrillReport) -> StoredRestoreDrillReport {
         observed_ref_count: u64::try_from(report.observed_ref_count).unwrap_or(u64::MAX),
         expected_ref_set_sha256: report.expected_ref_set_sha256.clone(),
         observed_ref_set_sha256: report.observed_ref_set_sha256.clone(),
+        lfs_restored: report.lfs_restored,
+        expected_lfs_object_count: report
+            .expected_lfs_object_count
+            .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+        observed_lfs_object_count: report
+            .observed_lfs_object_count
+            .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+        expected_lfs_bytes: report.expected_lfs_bytes,
+        observed_lfs_bytes: report.observed_lfs_bytes,
+        expected_lfs_aggregate_sha256: report.expected_lfs_aggregate_sha256.clone(),
+        observed_lfs_aggregate_sha256: report.observed_lfs_aggregate_sha256.clone(),
         network_disabled: report.network_disabled,
         live_mirror_accessed: report.live_mirror_accessed,
     }
@@ -182,6 +193,7 @@ const fn failure_code(failure: VerificationFailure) -> &'static str {
         VerificationFailure::IsolationFailed => "isolation_failed",
         VerificationFailure::RefMismatch => "ref_mismatch",
         VerificationFailure::ReplicaUnavailable => "replica_unavailable",
+        VerificationFailure::LfsInvalid => "lfs_invalid",
     }
 }
 

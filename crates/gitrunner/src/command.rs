@@ -25,12 +25,14 @@ pub enum Subcommand {
     ShowRef,
     /// `git bundle` — create a portable snapshot bundle.
     Bundle,
+    /// `git ls-remote` — bounded ref-only sibling discovery.
+    LsRemote,
 }
 
 impl Subcommand {
     /// Every subcommand, so the allowlist can never grow silently. The array length is the
     /// documented count; adding a variant without extending it does not compile.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Init,
         Self::Version,
         Self::Fsck,
@@ -39,6 +41,7 @@ impl Subcommand {
         Self::CloneMirror,
         Self::ShowRef,
         Self::Bundle,
+        Self::LsRemote,
     ];
 
     /// The literal argument word handed to the Git binary.
@@ -53,6 +56,7 @@ impl Subcommand {
             Self::CloneMirror => "clone",
             Self::ShowRef => "show-ref",
             Self::Bundle => "bundle",
+            Self::LsRemote => "ls-remote",
         }
     }
 }
@@ -224,6 +228,16 @@ impl GitOperation {
                 bundle.as_path().as_os_str().to_os_string(),
                 std::ffi::OsString::from("+refs/*:refs/*"),
             ],
+            credentials: None,
+        }
+    }
+
+    /// `git ls-remote <source>` — read remote refs without creating a repository or checkout.
+    #[must_use]
+    pub fn ls_remote(source: &crate::SourceUrl) -> Self {
+        Self {
+            subcommand: Subcommand::LsRemote,
+            arguments: vec![std::ffi::OsString::from(source.as_str())],
             credentials: None,
         }
     }

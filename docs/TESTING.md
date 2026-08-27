@@ -9,6 +9,10 @@ Required tests:
 - `fsck`, bundle creation/verify, hashes, manifests, and tool versions.
 - Local/off-host upload, corruption, partial object, retry, and replica verification.
 - Isolated restore and ref/object/LFS comparison.
+- Real local LFS objects on multiple refs, manifest round-trip, source/live-mirror removal, quota
+  refusal, corrupt/missing object failure, and off-host artifact inventory.
+- Wiki present/confirmed-absent/auth-timeout ambiguity with one idempotent sibling target and the
+  shared independent mirror path.
 - Quotas, process groups, environment/path confinement, and output redaction.
 - Pin/grace/tombstone/retention/physical deletion matrix.
 - Current-schema application, outbox/inbox replay, and GitHub-to-Vault workspace flow.

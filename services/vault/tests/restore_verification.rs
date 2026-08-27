@@ -96,6 +96,13 @@ async fn verified_replica_bundle_restores_exact_refs_from_downloaded_bytes() {
     store
         .publish_file(&bundle, &bundle_source)
         .expect("bundle publication");
+    let lfs_blob = publish_blob(
+        &store,
+        &root,
+        "replica-lfs-object",
+        b"replica-only-lfs-object",
+        "application/octet-stream",
+    );
     let signer = ManifestSigningKey::from_seed([21; 32]).expect("fixture signing key");
     let refs = git_output(&["show-ref"], &source)
         .lines()
@@ -112,6 +119,13 @@ async fn verified_replica_bundle_restores_exact_refs_from_downloaded_bytes() {
         vec![bundle.clone()],
         None,
         "2026-08-27T00:00:00Z".to_owned(),
+        Some(LfsEvidence::new(
+            "git-lfs/fixture".to_owned(),
+            vec![LfsObjectEvidence {
+                oid: lfs_blob.sha256.clone(),
+                blob: lfs_blob.clone(),
+            }],
+        )),
         &signer,
     )
     .expect("signed fixture manifest");
@@ -122,21 +136,7 @@ async fn verified_replica_bundle_restores_exact_refs_from_downloaded_bytes() {
     let replica_target_id = Uuid::now_v7();
     let replica = ReplicaStore::new("offsite".to_owned(), replica_target(fixture.endpoint()))
         .expect("fixture replica store");
-    replica
-        .upload_and_verify(&bundle, &store.resolve(&bundle).expect("local bundle"))
-        .await
-        .expect("replicated bundle");
-    replica
-        .upload_and_verify(
-            &manifest_ref,
-            &store.resolve(&manifest_ref).expect("local manifest"),
-        )
-        .await
-        .expect("replicated manifest");
-    std::fs::remove_file(store.resolve(&bundle).expect("test-owned bundle"))
-        .expect("remove local bundle proof");
-    std::fs::remove_file(store.resolve(&manifest_ref).expect("test-owned manifest"))
-        .expect("remove local manifest proof");
+    replicate_and_remove_local(&replica, &store, [&bundle, &manifest_ref, &lfs_blob]).await;
     let live_mirror_root = root.join("live-mirrors");
     std::fs::create_dir_all(&live_mirror_root).expect("live mirror root");
     let drill = RestoreDrill::new(
@@ -161,11 +161,15 @@ async fn verified_replica_bundle_restores_exact_refs_from_downloaded_bytes() {
         report.observed_ref_set_sha256
     );
     assert_eq!(report.expected_ref_count, report.observed_ref_count);
+    assert_eq!(report.lfs_restored, Some(true));
+    assert_eq!(report.observed_lfs_object_count, Some(1));
 }
 use ratatoskr_vault_blobstore::LocalBlobStore;
 use ratatoskr_vault_blobstore::replica::ReplicaStore;
 use ratatoskr_vault_core::config::ReplicaTargetConfig;
-use ratatoskr_vault_core::snapshot::{ManifestSigningKey, RefEvidence, SnapshotManifest};
+use ratatoskr_vault_core::snapshot::{
+    LfsEvidence, LfsObjectEvidence, ManifestSigningKey, RefEvidence, SnapshotManifest,
+};
 use s3_support::S3Fixture;
 use secrecy::SecretString;
 use url::Url;
@@ -252,6 +256,7 @@ fn stored_bundle_hash_mismatch_produces_complete_failed_verification_report() {
         vec![bundle.clone()],
         None,
         "2026-08-27T00:00:00Z".to_owned(),
+        None,
         &signer,
     )
     .expect("signed fixture manifest");
@@ -289,6 +294,74 @@ fn stored_bundle_hash_mismatch_produces_complete_failed_verification_report() {
     }));
 }
 
+#[test]
+fn corrupt_stored_lfs_object_fails_without_live_fallback() {
+    let root = temporary_root();
+    let source = create_source_repository(&root);
+    let bundle_source = root.join("lfs-corruption.bundle");
+    git(
+        &["bundle", "create", path_text(&bundle_source), "--all"],
+        &source,
+    );
+    let store =
+        LocalBlobStore::new(root.join("blobs"), 1_000_000).expect("fixture store must initialize");
+    let bundle = store
+        .reference_for_file(&bundle_source, "application/vnd.git.bundle".to_owned())
+        .expect("bundle reference");
+    store
+        .publish_file(&bundle, &bundle_source)
+        .expect("bundle publication");
+    let object_source = root.join("lfs-object");
+    std::fs::write(&object_source, b"immutable-lfs-bytes").expect("LFS object");
+    let object = store
+        .reference_for_file(&object_source, "application/octet-stream".to_owned())
+        .expect("LFS reference");
+    store
+        .publish_file(&object, &object_source)
+        .expect("LFS publication");
+    let refs = git_output(&["show-ref"], &source)
+        .lines()
+        .map(|line| {
+            let (oid, name) = line.split_once(' ').expect("show-ref line");
+            RefEvidence {
+                name: name.to_owned(),
+                oid: oid.to_owned(),
+            }
+        })
+        .collect();
+    let signer = ManifestSigningKey::from_seed([31; 32]).expect("signing key");
+    let manifest = SnapshotManifest::new(
+        refs,
+        vec![bundle],
+        None,
+        "2026-08-27T00:00:00Z".to_owned(),
+        Some(LfsEvidence::new(
+            "git-lfs/fixture".to_owned(),
+            vec![LfsObjectEvidence {
+                oid: object.sha256.clone(),
+                blob: object.clone(),
+            }],
+        )),
+        &signer,
+    )
+    .expect("signed LFS manifest");
+    let manifest_ref = publish_manifest(&store, &root, &manifest);
+    std::fs::write(store.resolve(&object).expect("stored LFS path"), b"corrupt")
+        .expect("corruption injection");
+
+    let report = ArtifactVerifier::new(store, vec![signer.verification_key()], 16)
+        .verify(Uuid::now_v7(), manifest_ref);
+
+    assert_eq!(report.outcome, ReportOutcome::Failed);
+    assert_eq!(report.failure, Some(VerificationFailure::LfsInvalid));
+    assert!(
+        report
+            .stages
+            .iter()
+            .any(|stage| stage.stage == "lfs_object_hash" && !stage.passed)
+    );
+}
+
 #[tokio::test]
 async fn valid_bundle_restores_exact_manifest_refs_without_live_mirror_access() {
     let root = temporary_root();
@@ -322,6 +395,7 @@ async fn valid_bundle_restores_exact_manifest_refs_without_live_mirror_access() 
         vec![bundle],
         None,
         "2026-08-27T00:00:00Z".to_owned(),
+        None,
         &signer,
     )
     .expect("signed fixture manifest");
@@ -420,6 +494,7 @@ async fn restore_ref_mismatch_is_failed_and_live_mirror_remains_unchanged() {
         vec![bundle],
         None,
         "2026-08-27T00:00:00Z".to_owned(),
+        None,
         &signer,
     )
     .expect("signed fixture manifest");
@@ -487,6 +562,39 @@ fn publish_manifest(
         .publish_file(&reference, &source)
         .expect("manifest publication");
     reference
+}
+
+fn publish_blob(
+    store: &LocalBlobStore,
+    root: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+    media_type: &str,
+) -> ratatoskr_vault_core::snapshot::BlobRef {
+    let source = root.join(name);
+    std::fs::write(&source, bytes).expect("fixture blob source");
+    let reference = store
+        .reference_for_file(&source, media_type.to_owned())
+        .expect("fixture blob reference");
+    store
+        .publish_file(&reference, &source)
+        .expect("fixture blob publication");
+    reference
+}
+
+async fn replicate_and_remove_local<const N: usize>(
+    replica: &ReplicaStore,
+    store: &LocalBlobStore,
+    references: [&ratatoskr_vault_core::snapshot::BlobRef; N],
+) {
+    for reference in references {
+        let source = store.resolve(reference).expect("local replica source");
+        replica
+            .upload_and_verify(reference, &source)
+            .await
+            .expect("replicated fixture object");
+        std::fs::remove_file(source).expect("remove local replica source");
+    }
 }
 
 fn replica_target(endpoint: &str) -> ReplicaTargetConfig {

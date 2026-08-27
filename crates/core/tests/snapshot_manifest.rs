@@ -1,8 +1,8 @@
 //! Snapshot manifest contract tests.
 
 use ratatoskr_vault_core::snapshot::{
-    BlobRef, ManifestError, ManifestSigningKey, RefEvidence, SnapshotManifest,
-    verify_manifest_chain,
+    BlobRef, LfsEvidence, LfsObjectEvidence, ManifestError, ManifestSigningKey, RefEvidence,
+    SnapshotManifest, verify_manifest_chain,
 };
 
 #[test]
@@ -28,6 +28,7 @@ fn manifest_canonically_records_all_refs_digests_generator_parent_and_bundle_ref
         vec![bundle.clone()],
         None,
         "2026-08-26T00:00:00Z".to_owned(),
+        None,
         &signer,
     )
     .expect("fixture manifest must sign");
@@ -43,6 +44,50 @@ fn manifest_canonically_records_all_refs_digests_generator_parent_and_bundle_ref
     assert!(manifest.parent_manifest.is_none());
     assert_eq!(manifest.bundles, vec![bundle]);
     assert_eq!(manifest.ref_set_sha256.len(), 64);
+}
+
+#[test]
+fn lfs_manifest_is_canonical_complete_and_signed_in_schema_version_one() {
+    let signer = ManifestSigningKey::from_seed([19; 32]).expect("fixed signer");
+    let object = |oid: &str, size_bytes| LfsObjectEvidence {
+        oid: oid.to_owned(),
+        blob: BlobRef {
+            owner: "ratatoskr-vault".to_owned(),
+            sha256: oid.to_owned(),
+            media_type: "application/octet-stream".to_owned(),
+            size_bytes,
+        },
+    };
+    let first = object(&"1".repeat(64), 3);
+    let second = object(&"2".repeat(64), 5);
+    let build = |objects| {
+        SnapshotManifest::new(
+            vec![RefEvidence {
+                name: "refs/heads/main".to_owned(),
+                oid: "a".repeat(40),
+            }],
+            vec![BlobRef {
+                owner: "ratatoskr-vault".to_owned(),
+                sha256: "b".repeat(64),
+                media_type: "application/vnd.git.bundle".to_owned(),
+                size_bytes: 7,
+            }],
+            None,
+            "2026-08-27T00:00:00Z".to_owned(),
+            Some(LfsEvidence::new("git-lfs/3.7.1".to_owned(), objects)),
+            &signer,
+        )
+        .expect("manifest must sign")
+    };
+    let forward = build(vec![first.clone(), second.clone()]);
+    let reverse = build(vec![second, first]);
+
+    assert_eq!(forward.schema_version, 1);
+    assert_eq!(forward, reverse, "LFS observation order must be canonical");
+    assert_eq!(forward.lfs.as_ref().expect("LFS evidence").total_bytes, 8);
+    forward
+        .verify_signature(&[signer.verification_key()])
+        .expect("canonical LFS payload must verify");
 }
 
 #[test]
@@ -65,6 +110,7 @@ fn manifest_chain_rejects_unknown_key_cycle_and_broken_parent() {
         }],
         None,
         "2026-08-27T00:00:00Z".to_owned(),
+        None,
         &signer,
     )
     .expect("fixture manifest must serialize");
@@ -80,6 +126,7 @@ fn manifest_chain_rejects_unknown_key_cycle_and_broken_parent() {
         manifest.bundles,
         manifest.parent_manifest,
         manifest.created_at,
+        None,
         &signer,
     )
     .expect("cyclic fixture must sign");
@@ -99,6 +146,7 @@ fn manifest_chain_rejects_unknown_key_cycle_and_broken_parent() {
         Vec::new(),
         Some(missing),
         "2026-08-27T00:00:01Z".to_owned(),
+        None,
         &signer,
     )
     .expect("child fixture must sign");
@@ -131,6 +179,7 @@ fn signed_manifest_rejects_tampered_payload() {
         }],
         None,
         "2026-08-27T00:00:00Z".to_owned(),
+        None,
         &signer,
     )
     .expect("fixture manifest must serialize");

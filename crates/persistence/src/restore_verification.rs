@@ -78,6 +78,20 @@ pub struct StoredRestoreDrillReport {
     pub expected_ref_set_sha256: String,
     /// Observed canonical ref-set SHA-256.
     pub observed_ref_set_sha256: String,
+    /// Null for Git-only snapshots; otherwise whether LFS evidence matched.
+    pub lfs_restored: Option<bool>,
+    /// Expected LFS object count.
+    pub expected_lfs_object_count: Option<u64>,
+    /// Observed LFS object count.
+    pub observed_lfs_object_count: Option<u64>,
+    /// Expected LFS bytes.
+    pub expected_lfs_bytes: Option<u64>,
+    /// Observed LFS bytes.
+    pub observed_lfs_bytes: Option<u64>,
+    /// Expected canonical LFS aggregate digest.
+    pub expected_lfs_aggregate_sha256: Option<String>,
+    /// Observed canonical LFS aggregate digest.
+    pub observed_lfs_aggregate_sha256: Option<String>,
     /// Structural local-only transport assertion.
     pub network_disabled: bool,
     /// Must remain false for every valid report.
@@ -271,17 +285,40 @@ impl Database {
         let duration_millis = checked_i64(report.duration_millis)?;
         let expected_ref_count = checked_i64(report.expected_ref_count)?;
         let observed_ref_count = checked_i64(report.observed_ref_count)?;
+        let expected_lfs_object_count = report
+            .expected_lfs_object_count
+            .map(checked_i64)
+            .transpose()?;
+        let observed_lfs_object_count = report
+            .observed_lfs_object_count
+            .map(checked_i64)
+            .transpose()?;
+        let expected_lfs_bytes = report.expected_lfs_bytes.map(checked_i64).transpose()?;
+        let observed_lfs_bytes = report.observed_lfs_bytes.map(checked_i64).transpose()?;
+        let expected_lfs_aggregate_hash = report
+            .expected_lfs_aggregate_sha256
+            .as_deref()
+            .map(decode_digest)
+            .transpose()?;
+        let observed_lfs_aggregate_hash = report
+            .observed_lfs_aggregate_sha256
+            .as_deref()
+            .map(decode_digest)
+            .transpose()?;
         let mut transaction = self.pool().begin().await.map_err(storage_failure)?;
 
         sqlx::query(
             "insert into git_vault.restore_drills
                  (drill_id, snapshot_id, manifest_hash, source_kind, replica_target_id,
                   outcome, failure_class, refs_matched,
-                  lfs_restored, duration_millis, stages, expected_ref_count, observed_ref_count,
+                  lfs_restored, expected_lfs_object_count, observed_lfs_object_count,
+                  expected_lfs_bytes, observed_lfs_bytes, expected_lfs_aggregate_hash,
+                  observed_lfs_aggregate_hash, duration_millis, stages, expected_ref_count, observed_ref_count,
                   expected_refs_hash, observed_refs_hash, network_disabled,
                   live_mirror_accessed, started_at, finished_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, null, $9, $10, $11, $12, $13, $14,
-                     $15, $16, now() - ($9 * interval '1 millisecond'), now())",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                     $16, $17, $18, $19, $20, $21, $22, $23,
+                     now() - ($16 * interval '1 millisecond'), now())",
         )
         .bind(report.drill_id)
         .bind(report.snapshot_id)
@@ -291,6 +328,13 @@ impl Database {
         .bind(report.outcome.as_str())
         .bind(&report.failure_class)
         .bind(report.refs_matched)
+        .bind(report.lfs_restored)
+        .bind(expected_lfs_object_count)
+        .bind(observed_lfs_object_count)
+        .bind(expected_lfs_bytes)
+        .bind(observed_lfs_bytes)
+        .bind(expected_lfs_aggregate_hash)
+        .bind(observed_lfs_aggregate_hash)
         .bind(duration_millis)
         .bind(&report.stages)
         .bind(expected_ref_count)
@@ -341,12 +385,31 @@ fn validate_report(report: &StoredRestoreDrillReport) -> Result<(), VaultError> 
         || !report.stages.is_array()
         || !report.network_disabled
         || report.live_mirror_accessed
+        || !lfs_evidence_consistent(report)
     {
         return Err(VaultError::InvalidDelivery {
             field: "restore_drill_report",
         });
     }
     Ok(())
+}
+
+fn lfs_evidence_consistent(report: &StoredRestoreDrillReport) -> bool {
+    let values_present = report.lfs_restored.is_some()
+        && report.expected_lfs_object_count.is_some()
+        && report.observed_lfs_object_count.is_some()
+        && report.expected_lfs_bytes.is_some()
+        && report.observed_lfs_bytes.is_some()
+        && report.expected_lfs_aggregate_sha256.is_some()
+        && report.observed_lfs_aggregate_sha256.is_some();
+    let values_absent = report.lfs_restored.is_none()
+        && report.expected_lfs_object_count.is_none()
+        && report.observed_lfs_object_count.is_none()
+        && report.expected_lfs_bytes.is_none()
+        && report.observed_lfs_bytes.is_none()
+        && report.expected_lfs_aggregate_sha256.is_none()
+        && report.observed_lfs_aggregate_sha256.is_none();
+    values_present || values_absent
 }
 
 fn validate_verification_report(report: &StoredVerificationReport) -> Result<(), VaultError> {

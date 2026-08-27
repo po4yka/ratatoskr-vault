@@ -370,7 +370,14 @@ inspect repository for LFS use
 -> include LFS restore step
 ```
 
-LFS collection is separately retryable and can leave a snapshot in `assets_partial` or degraded state rather than falsely claiming completeness.
+LFS collection is explicitly enabled per target and separately retryable. It runs only typed
+`git-lfs` operations in a run-owned confined environment, enforces object and staged-byte limits,
+publishes each verified object by SHA-256, and records append-only terminal evidence. A required
+incomplete or over-quota collection degrades the target rather than signing an LFS-complete
+manifest. Manifest schema version 1 carries the canonical ordered object set and aggregate digest;
+snapshot artifact inventory therefore replicates each object off-host. Restore verifies stored
+BlobRefs and reconstructs the standard bare-repository `lfs/objects/aa/bb/<oid>` layout without
+source or live-mirror access.
 
 ## 12. Complete archive collectors
 
@@ -395,7 +402,19 @@ Each collector has:
 - rate-limit policy;
 - restore/export procedure.
 
-A complete archive is a manifest of verified component artifacts, not one opaque command.
+A complete archive is a manifest of verified component artifacts, not one opaque command. Wiki is
+the only implemented sibling collector: a typed `ls-remote` probe distinguishes confirmed absence
+from auth, timeout, and ambiguous failures; a present wiki is enrolled as one related target and
+uses the ordinary mirror/quota/snapshot/verification pipeline independently.
+
+Provider-API auxiliary collectors require a separate owner approval before implementation. The
+approval record must name exactly one collector and define: governing policy input; least-privilege
+credential scope and injection path; completeness/cursor contract; quota and rate-limit budgets;
+immutable artifact and manifest fields; verification/export or restore procedure; retention and
+off-host behavior; failure taxonomy and health effect; hostile-input fixtures; and rollout/rollback
+evidence. A generic `complete_archive` request, an existing provider token, or this extension point
+does not grant approval. Releases/assets and issues/comments are currently unsupported and perform
+no provider API calls.
 
 ## 13. BlobStore and off-host storage
 

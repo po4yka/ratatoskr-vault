@@ -15,7 +15,7 @@ async fn snapshot_records_link_one_manifest_and_bundle_refs_to_the_successful_mi
     let manifest = blob("2", "application/json");
     let snapshot_id = fixture
         .database
-        .record_built_snapshot(source, None, &bundle, &manifest, &"3".repeat(64))
+        .record_built_snapshot(source, None, &bundle, &manifest, &"3".repeat(64), None)
         .await
         .expect("built snapshot record");
 

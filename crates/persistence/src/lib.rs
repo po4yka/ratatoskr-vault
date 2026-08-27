@@ -13,10 +13,12 @@
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+mod lfs_collection;
 mod mirror_lifecycle;
 mod replication;
 mod restore_verification;
 mod snapshot;
+mod wiki;
 
 use std::time::Duration;
 
@@ -28,6 +30,7 @@ use sqlx::error::DatabaseError;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use uuid::Uuid;
 
+pub use crate::lfs_collection::LfsCollectionTerminal;
 pub use crate::mirror_lifecycle::QuotaReservationOutcome;
 pub use crate::replication::{
     DueReplicationUnit, ReplicaTargetObservation, StoredReplicaPlacement,
@@ -37,6 +40,7 @@ pub use crate::restore_verification::{
     VerificationScheduleRecord,
 };
 pub use crate::snapshot::{SnapshotParent, SnapshotSource};
+pub use crate::wiki::{WikiDiscovery, WikiDiscoveryRecord};
 
 /// The schema, embedded at compile time.
 ///
@@ -308,7 +312,8 @@ impl Database {
             "insert into git_vault.targets
                  (target_id, provider, external_repository_id, status, created_at, updated_at)
              values ($1, $2, $3, 'requested', now(), now())
-             on conflict (provider, external_repository_id) do nothing
+             on conflict (provider, external_repository_id) where target_kind = 'repository'
+             do nothing
              returning target_id",
         )
         .bind(Uuid::now_v7())
@@ -343,7 +348,8 @@ impl Database {
             }
             None => sqlx::query_scalar(
                 "select target_id from git_vault.targets
-                     where provider = $1 and external_repository_id = $2 for update",
+                     where provider = $1 and external_repository_id = $2
+                       and target_kind = 'repository' for update",
             )
             .bind(provider)
             .bind(external_repository_id)

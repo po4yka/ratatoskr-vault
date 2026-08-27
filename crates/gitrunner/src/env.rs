@@ -66,3 +66,50 @@ pub fn child_environment(git_dir: &Path, home: &Path) -> BTreeMap<OsString, OsSt
     debug_assert_eq!(env.len(), CHILD_ENV_KEYS.len());
     env
 }
+
+/// Builds the fixed Git LFS child environment without inheriting repository-controlled filters
+/// or transfer adapters.
+#[must_use]
+pub fn lfs_child_environment(
+    lfs_dir: &Path,
+    home: &Path,
+    mirror: &Path,
+    storage: &Path,
+    standalone_file: bool,
+) -> BTreeMap<OsString, OsString> {
+    let mut env = child_environment(lfs_dir, home);
+    env.insert(OsString::from("GIT_DIR"), mirror.as_os_str().to_os_string());
+    env.insert(OsString::from("GIT_LFS_SKIP_SMUDGE"), OsString::from("1"));
+
+    let mut fixed_config = vec![
+        ("core.hooksPath", OsString::from("/dev/null")),
+        ("lfs.fetchinclude", OsString::new()),
+        ("lfs.fetchexclude", OsString::new()),
+        ("filter.lfs.process", OsString::new()),
+        ("filter.lfs.smudge", OsString::new()),
+        ("filter.lfs.clean", OsString::new()),
+    ];
+    fixed_config.push(if standalone_file {
+        (
+            "lfs.standalonetransferagent",
+            OsString::from("lfs-standalone-file"),
+        )
+    } else {
+        ("lfs.basictransfersonly", OsString::from("true"))
+    });
+    if !standalone_file {
+        fixed_config.push(("lfs.storage", storage.as_os_str().to_os_string()));
+    }
+    env.insert(
+        OsString::from("GIT_CONFIG_COUNT"),
+        OsString::from(fixed_config.len().to_string()),
+    );
+    for (index, (key, value)) in fixed_config.into_iter().enumerate() {
+        env.insert(
+            OsString::from(format!("GIT_CONFIG_KEY_{index}")),
+            OsString::from(key),
+        );
+        env.insert(OsString::from(format!("GIT_CONFIG_VALUE_{index}")), value);
+    }
+    env
+}

@@ -1,7 +1,7 @@
 //! Append-only persistence for immutable snapshot evidence.
 
 use ratatoskr_vault_core::error::VaultError;
-use ratatoskr_vault_core::snapshot::BlobRef;
+use ratatoskr_vault_core::snapshot::{BlobRef, LfsEvidence, canonical_lfs_digest};
 use uuid::Uuid;
 
 use crate::Database;
@@ -83,6 +83,7 @@ impl Database {
         bundle: &BlobRef,
         manifest: &BlobRef,
         refs_hash: &str,
+        lfs: Option<&LfsEvidence>,
     ) -> Result<Uuid, VaultError> {
         let bundle_hash = decode_digest(&bundle.sha256)?;
         let manifest_hash = decode_digest(&manifest.sha256)?;
@@ -96,6 +97,7 @@ impl Database {
                 field: "snapshot_blob_ref",
             });
         }
+        validate_lfs_evidence(lfs)?;
         let bundle_size = checked_size(bundle.size_bytes)?;
         let manifest_size = checked_size(manifest.size_bytes)?;
         let snapshot_id = Uuid::now_v7();
@@ -106,8 +108,8 @@ impl Database {
         sqlx::query(
             "insert into git_vault.snapshots
                  (snapshot_id, target_id, mirror_id, mirror_lifecycle_run_id, parent_snapshot_id,
-                  format, status, refs_hash, created_at)
-             values ($1, $2, $3, $4, $5, 'git_bundle', 'built', $6, now())",
+                  format, status, refs_hash, includes_lfs, created_at)
+             values ($1, $2, $3, $4, $5, 'git_bundle', 'built', $6, $7, now())",
         )
         .bind(snapshot_id)
         .bind(source.target_id)
@@ -115,10 +117,11 @@ impl Database {
         .bind(source.mirror_lifecycle_run_id)
         .bind(parent_snapshot_id)
         .bind(refs_hash)
+        .bind(lfs.is_some())
         .execute(&mut *transaction)
         .await
         .map_err(storage_failure)?;
-        insert_artifact(
+        let _bundle_artifact = insert_artifact(
             &mut *transaction,
             snapshot_id,
             "git_bundle",
@@ -127,7 +130,7 @@ impl Database {
             bundle_size,
         )
         .await?;
-        insert_artifact(
+        let _manifest_artifact = insert_artifact(
             &mut *transaction,
             snapshot_id,
             "manifest",
@@ -136,6 +139,7 @@ impl Database {
             manifest_size,
         )
         .await?;
+        insert_lfs_artifacts(&mut transaction, snapshot_id, lfs).await?;
         sqlx::query(
             "insert into git_vault.manifests
                  (manifest_id, snapshot_id, schema_version, manifest_hash, blob_owner,
@@ -154,6 +158,68 @@ impl Database {
         transaction.commit().await.map_err(storage_failure)?;
         Ok(snapshot_id)
     }
+}
+
+fn validate_lfs_evidence(lfs: Option<&LfsEvidence>) -> Result<(), VaultError> {
+    if lfs.is_some_and(|evidence| {
+        evidence.aggregate_sha256 != canonical_lfs_digest(&evidence.objects)
+            || evidence.total_bytes
+                != evidence
+                    .objects
+                    .iter()
+                    .map(|object| object.blob.size_bytes)
+                    .sum::<u64>()
+    }) {
+        Err(VaultError::InvalidDelivery {
+            field: "snapshot_lfs_object",
+        })
+    } else {
+        Ok(())
+    }
+}
+
+async fn insert_lfs_artifacts(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    snapshot_id: Uuid,
+    lfs: Option<&LfsEvidence>,
+) -> Result<(), VaultError> {
+    let Some(lfs) = lfs else {
+        return Ok(());
+    };
+    for object in &lfs.objects {
+        validate_blob_ref(&object.blob)?;
+        if object.oid != object.blob.sha256 || object.blob.media_type != "application/octet-stream"
+        {
+            return Err(VaultError::InvalidDelivery {
+                field: "snapshot_lfs_object",
+            });
+        }
+        let hash = decode_digest(&object.blob.sha256)?;
+        let size = checked_size(object.blob.size_bytes)?;
+        let artifact_id = insert_artifact(
+            &mut **transaction,
+            snapshot_id,
+            "lfs_object",
+            &object.blob,
+            hash.clone(),
+            size,
+        )
+        .await?;
+        sqlx::query(
+            "insert into git_vault.lfs_snapshot_objects
+                 (snapshot_id, artifact_id, oid, sha256_hash, size_bytes)
+             values ($1, $2, $3, $4, $5)",
+        )
+        .bind(snapshot_id)
+        .bind(artifact_id)
+        .bind(&object.oid)
+        .bind(hash)
+        .bind(size)
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage_failure)?;
+    }
+    Ok(())
 }
 
 async fn ensure_healthy_source<'e, E>(executor: E, source: SnapshotSource) -> Result<(), VaultError>
@@ -226,17 +292,18 @@ async fn insert_artifact<'e, E>(
     reference: &BlobRef,
     hash: Vec<u8>,
     size_bytes: i64,
-) -> Result<(), VaultError>
+) -> Result<Uuid, VaultError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    let artifact_id = Uuid::now_v7();
     sqlx::query(
         "insert into git_vault.snapshot_artifacts
              (artifact_id, snapshot_id, kind, sha256_hash, blob_owner, digest_algorithm,
               media_type, size_bytes, created_at)
          values ($1, $2, $3, $4, $5, 'sha256', $6, $7, now())",
     )
-    .bind(Uuid::now_v7())
+    .bind(artifact_id)
     .bind(snapshot_id)
     .bind(kind)
     .bind(hash)
@@ -245,8 +312,8 @@ where
     .bind(size_bytes)
     .execute(executor)
     .await
-    .map(|_| ())
-    .map_err(storage_failure)
+    .map_err(storage_failure)?;
+    Ok(artifact_id)
 }
 
 fn validate_blob_ref(reference: &BlobRef) -> Result<(), VaultError> {

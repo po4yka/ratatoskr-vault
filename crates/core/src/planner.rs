@@ -4,6 +4,7 @@
 //! executor decides what it can perform today; forward-looking items stay visible as
 //! planned-not-executable work instead of being silently dropped (design D5).
 
+use crate::collectors::UnsupportedCollector;
 use crate::delivery::ValidatedDelivery;
 use crate::target_state::TargetStatus;
 
@@ -65,6 +66,8 @@ pub enum DivergenceKind {
     /// The governing policy withdrew, but the pinned target keeps its protection: exclusion is
     /// blocked and the disagreement stays observable instead of being silently dropped.
     PinnedWithdrawal,
+    /// A desired provider collector is known but has not been separately approved for execution.
+    UnsupportedCollector(UnsupportedCollector),
 }
 
 /// The planner's complete proposal for one convergence pass.
@@ -91,6 +94,16 @@ pub fn plan(desired: &ValidatedDelivery, observed: Option<TargetStatus>) -> Reco
     let withdrawn = desired.preservation_level == "none";
     let mut items = Vec::new();
     let mut divergences = Vec::new();
+    if matches!(desired.include_releases, Some(true)) {
+        divergences.push(Divergence {
+            kind: DivergenceKind::UnsupportedCollector(UnsupportedCollector::Releases),
+        });
+    }
+    if matches!(desired.include_issues, Some(true)) {
+        divergences.push(Divergence {
+            kind: DivergenceKind::UnsupportedCollector(UnsupportedCollector::Issues),
+        });
+    }
     match observed {
         None if !withdrawn => items.push(WorkItem::Enroll),
         Some(TargetStatus::Excluded) if withdrawn => {}
@@ -134,8 +147,8 @@ mod tests {
             preservation_level: "git_mirror".to_owned(),
             pinned: Some(false),
             include_wiki: Some(false),
-            include_releases: Some(true),
-            include_issues: Some(true),
+            include_releases: Some(false),
+            include_issues: Some(false),
             offsite_required: Some(true),
             correlation_id: "corr-enroll".to_owned(),
             policy_revision: Some(1),

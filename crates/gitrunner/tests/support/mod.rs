@@ -60,6 +60,7 @@ pub(crate) fn probe_exe() -> PathBuf {
         .parent()
         .expect("test binary has a parent directory");
     let entries = std::fs::read_dir(dir).expect("the test binary directory must be readable");
+    let mut newest = None;
     for entry in entries.flatten() {
         let path = entry.path();
         // Cargo writes `probe-<hash>` for the binary next to `probe-<hash>.d` dep-info files
@@ -68,8 +69,20 @@ pub(crate) fn probe_exe() -> PathBuf {
             && path.extension().is_none()
             && path.is_file();
         if is_extensionless_executable {
-            return path;
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if newest
+                .as_ref()
+                .is_none_or(|(newest_modified, _)| modified > *newest_modified)
+            {
+                newest = Some((modified, path));
+            }
         }
+    }
+    if let Some((_modified, path)) = newest {
+        return path;
     }
     panic!(
         "probe-<hash> executable not found next to {}",

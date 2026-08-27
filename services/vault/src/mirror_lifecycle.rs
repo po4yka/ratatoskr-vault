@@ -14,9 +14,11 @@ use ratatoskr_vault_core::target_state::TargetStatus;
 use ratatoskr_vault_gitrunner::{
     ConfinedPath, GitOperation, GitRunner, RunConfig, SourceUrl, Subcommand,
 };
-use ratatoskr_vault_persistence::{Database, QuotaReservationOutcome};
+use ratatoskr_vault_persistence::{Database, LfsCollectionTerminal, QuotaReservationOutcome};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+use crate::lfs_collection::{LfsCollection, LfsCollectionError, LfsCollector};
 
 /// Trusted settings for the single-host mirror executor.
 #[derive(Debug, Clone)]
@@ -72,6 +74,7 @@ pub struct MirrorRequest {
     target_id: Uuid,
     source: String,
     reservation_bytes: u64,
+    lfs_enabled: bool,
 }
 
 impl MirrorRequest {
@@ -82,25 +85,50 @@ impl MirrorRequest {
             target_id,
             source,
             reservation_bytes,
+            lfs_enabled: false,
         }
+    }
+
+    /// Explicitly requires Git LFS collection inside this admitted lifecycle.
+    #[must_use]
+    pub const fn with_lfs(mut self) -> Self {
+        self.lfs_enabled = true;
+        self
     }
 }
 
 /// The returned terminal outcome, whose detailed evidence is durable in `PostgreSQL`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LifecycleOutcome(MirrorResult);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleOutcome {
+    mirror: MirrorResult,
+    lfs_required: bool,
+    lfs: Option<LfsCollection>,
+    lfs_failure_class: Option<&'static str>,
+}
 
 impl LifecycleOutcome {
     /// Whether this run published or refreshed a verified mirror.
     #[must_use]
-    pub const fn is_success(self) -> bool {
-        self.0.is_success()
+    pub const fn is_success(&self) -> bool {
+        self.mirror.is_success() && (!self.lfs_required || self.lfs.is_some())
     }
 
     /// The closed result; detailed diagnostics stay bounded in the durable run evidence.
     #[must_use]
-    pub const fn result(self) -> MirrorResult {
-        self.0
+    pub const fn result(&self) -> MirrorResult {
+        self.mirror
+    }
+
+    /// Complete LFS evidence only when explicitly required and successfully collected.
+    #[must_use]
+    pub const fn lfs(&self) -> Option<&LfsCollection> {
+        self.lfs.as_ref()
+    }
+
+    /// Stable typed failure class when required LFS collection did not complete.
+    #[must_use]
+    pub const fn lfs_failure_class(&self) -> Option<&'static str> {
+        self.lfs_failure_class
     }
 }
 
@@ -110,6 +138,7 @@ pub struct MirrorLifecycle {
     database: Database,
     settings: MirrorLifecycleSettings,
     permits: Arc<Semaphore>,
+    lfs_collector: Option<LfsCollector>,
 }
 
 impl MirrorLifecycle {
@@ -129,7 +158,15 @@ impl MirrorLifecycle {
             database,
             settings,
             permits: Arc::new(Semaphore::new(4)),
+            lfs_collector: None,
         })
+    }
+
+    /// Attaches the explicitly configured LFS collector used only by LFS-enabled requests.
+    #[must_use]
+    pub fn with_lfs_collector(mut self, collector: LfsCollector) -> Self {
+        self.lfs_collector = Some(collector);
+        self
     }
 
     /// Runs an admitted initial clone or periodic fetch to one terminal durable result.
@@ -179,12 +216,13 @@ impl MirrorLifecycle {
             .await?;
 
         let run_id = Uuid::now_v7();
+        let reservation_bytes = self.admitted_reservation(&request);
         let admission = self
             .database
             .reserve_mirror_quota(
                 request.target_id,
                 run_id,
-                request.reservation_bytes,
+                reservation_bytes,
                 self.settings.per_mirror_max_bytes,
                 self.settings.global_max_bytes,
             )
@@ -193,7 +231,12 @@ impl MirrorLifecycle {
             let result = MirrorResult::QuotaRefused;
             self.finish(request.target_id, run_id, operation, result)
                 .await?;
-            return Ok(LifecycleOutcome(result));
+            return Ok(LifecycleOutcome {
+                mirror: result,
+                lfs_required: request.lfs_enabled,
+                lfs: None,
+                lfs_failure_class: None,
+            });
         }
 
         if let Some(started) = &self.settings.admission_started {
@@ -214,7 +257,12 @@ impl MirrorLifecycle {
             };
             self.finish(request.target_id, run_id, operation, result)
                 .await?;
-            return Ok(LifecycleOutcome(result));
+            return Ok(LifecycleOutcome {
+                mirror: result,
+                lfs_required: request.lfs_enabled,
+                lfs: None,
+                lfs_failure_class: None,
+            });
         }
 
         let result = match operation {
@@ -227,9 +275,82 @@ impl MirrorLifecycle {
                     .await
             }
         };
+        let lfs_result = self.collect_lfs(&request, result).await;
         self.finish(request.target_id, run_id, operation, result)
             .await?;
-        Ok(LifecycleOutcome(result))
+        let (lfs, lfs_failure_class) = self
+            .persist_lfs_result(request.target_id, run_id, lfs_result)
+            .await?;
+        if request.lfs_enabled && lfs.is_none() && result.is_success() {
+            self.database
+                .set_target_status(request.target_id, TargetStatus::Degraded)
+                .await?;
+        }
+        Ok(LifecycleOutcome {
+            mirror: result,
+            lfs_required: request.lfs_enabled,
+            lfs,
+            lfs_failure_class,
+        })
+    }
+
+    fn admitted_reservation(&self, request: &MirrorRequest) -> u64 {
+        let lfs = request.lfs_enabled.then(|| {
+            self.lfs_collector
+                .as_ref()
+                .map_or(0, LfsCollector::reservation_bytes)
+        });
+        request.reservation_bytes.saturating_add(lfs.unwrap_or(0))
+    }
+
+    async fn collect_lfs(
+        &self,
+        request: &MirrorRequest,
+        result: MirrorResult,
+    ) -> Option<Result<LfsCollection, LfsCollectionError>> {
+        if !result.is_success() || !request.lfs_enabled {
+            return None;
+        }
+        match &self.lfs_collector {
+            Some(collector) => Some(
+                collector
+                    .collect(Path::new(&mirror_relative_path(request.target_id)))
+                    .await,
+            ),
+            None => Some(Err(LfsCollectionError::ToolUnavailable)),
+        }
+    }
+
+    async fn persist_lfs_result(
+        &self,
+        target_id: Uuid,
+        run_id: Uuid,
+        result: Option<Result<LfsCollection, LfsCollectionError>>,
+    ) -> Result<(Option<LfsCollection>, Option<&'static str>), VaultError> {
+        match result {
+            Some(Ok(collection)) => {
+                self.database
+                    .record_lfs_collection(
+                        target_id,
+                        run_id,
+                        LfsCollectionTerminal::Complete(&collection.evidence),
+                    )
+                    .await?;
+                Ok((Some(collection), None))
+            }
+            Some(Err(error)) => {
+                let failure_class = lfs_failure_class(&error);
+                self.database
+                    .record_lfs_collection(
+                        target_id,
+                        run_id,
+                        LfsCollectionTerminal::Failed { failure_class },
+                    )
+                    .await?;
+                Ok((None, Some(failure_class)))
+            }
+            None => Ok((None, None)),
+        }
     }
 
     /// The identifier-derived published location. Repository names never influence it.
@@ -489,6 +610,31 @@ impl MirrorLifecycle {
             stderr_cap_bytes: 64 * 1024,
             credential_helper: PathBuf::from("/usr/bin/false"),
         })
+    }
+}
+
+fn lfs_failure_class(error: &LfsCollectionError) -> &'static str {
+    match error {
+        LfsCollectionError::QuotaExceeded => FailureClass::QuotaExceeded.code(),
+        LfsCollectionError::UnsafePath => FailureClass::UnsafePath.code(),
+        LfsCollectionError::Runner(ratatoskr_vault_gitrunner::LfsRunnerError::Interrupted) => {
+            FailureClass::Interrupted.code()
+        }
+        LfsCollectionError::Runner(
+            ratatoskr_vault_gitrunner::LfsRunnerError::SpawnFailed { .. }
+            | ratatoskr_vault_gitrunner::LfsRunnerError::InvalidConfiguration { .. },
+        )
+        | LfsCollectionError::Storage
+        | LfsCollectionError::ToolUnavailable => FailureClass::DependencyUnavailable.code(),
+        LfsCollectionError::Runner(ratatoskr_vault_gitrunner::LfsRunnerError::Timeout {
+            ..
+        }) => FailureClass::RemoteUnavailable.code(),
+        LfsCollectionError::Runner(
+            ratatoskr_vault_gitrunner::LfsRunnerError::OutputLimitExceeded { .. },
+        )
+        | LfsCollectionError::ToolFailed { .. }
+        | LfsCollectionError::InvalidEnumeration
+        | LfsCollectionError::MissingOrCorrupt => FailureClass::LfsIncomplete.code(),
     }
 }
 

@@ -2,7 +2,10 @@
 
 `ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
-> **Status:** foundation through verified S3-compatible off-host replicas is implemented. A healthy bare mirror can produce an all-ref bundle and signed content-addressed manifest; scheduled verification re-hashes local or replica-downloaded bytes and proves exact refs in scratch. LFS collection, retention, and remote deletion/lifecycle management remain later plan items.
+> **Status:** preservation through Git LFS and wiki sibling targets is implemented. A healthy bare
+> mirror produces an all-ref bundle and signed content-addressed manifest; LFS-enabled targets add
+> verified objects, and restore drills reconstruct them without source or live-mirror access.
+> Provider-API auxiliary collectors remain approval-gated and absent.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -260,7 +263,8 @@ manifest and bundle bytes are downloaded into create-new UUID-owned scratch file
 before any network-disabled Git stage; the terminal report records the actual source target.
 
 It never checks out or executes repository code, accepts no network URL, and denies live-mirror
-paths before spawning Git. LFS restore is not claimed until the separate LFS plan item exists.
+paths before spawning Git. For an LFS manifest it also verifies every stored object, reconstructs
+the standard bare LFS object layout, and records exact count/bytes/aggregate proof.
 
 The system reports restore age and failure state separately from fetch age.
 
@@ -323,8 +327,9 @@ vault_build_info
 vault_readiness
 ```
 
-Target, sync, mirror, snapshot, verification, restore, storage, LFS, and retention metrics remain
-planned with the capabilities that would produce them.
+Replication and LFS/wiki collector telemetry uses only internal target ids plus closed
+collector/outcome/failure labels; repository names, remote URLs, and credentials are never metric
+labels. Retention metrics remain planned with that capability.
 
 Future target, operation, attempt, command, storage, and result spans will include their identifiers
 and classifications, but never embedded credentials. The implemented foundation currently records
@@ -339,9 +344,19 @@ process lifecycle and startup or shutdown context.
 - Automatic deletion immediately after upstream removal.
 - Claiming complete GitHub backup when only Git objects were preserved.
 
+## Auxiliary collector approval gate
+
+LFS and the Git wiki sibling are implemented. Releases/assets and issues/comments are not: adding
+either requires an explicit owner approval naming that one collector and its policy input,
+least-privilege credential, completeness/cursor contract, quota/rate limit, immutable artifact and
+manifest evidence, verification/export procedure, retention/off-host behavior, failure health
+semantics, hostile fixtures, and rollout/rollback. Existing provider credentials and
+`complete_archive` do not imply approval, and unsupported requests execute no provider API work.
+
 ## Implementation plan
 
-The authoritative sequence is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Items 1–3 (service foundation, desired-state reconciliation, confined Git runner with hostile-repository suite) are implemented. Items 4 through 10 remain planned.
+The authoritative sequence is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Items
+1–8 are implemented; items 9–10 remain planned.
 
 ## Workspace integration
 
@@ -353,6 +368,12 @@ service is unavailable.
 
 ## Project status
 
-Implemented so far: the service foundation (1), desired-state reconciliation (2), the confined Git runner (3), local mirror lifecycle (4), immutable full-bundle snapshots and manifests (5), signed stored-byte verification with isolated restore drills (6), and bounded verified S3-compatible off-host replicas with replica-origin drills (7). Verification and replication scheduling are deterministic and budget-aware; terminal reports are append-only and alert-worthy failure facts enter the transactional outbox. The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
+Implemented so far: items 1–8, including explicitly enabled Git LFS object preservation in signed
+manifests and restore drills, off-host LFS artifact inventory, and independently mirrored wiki
+sibling targets. Verification and replication scheduling are deterministic and budget-aware;
+terminal reports are append-only and alert-worthy failure facts enter the transactional outbox. The
+repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
 
-Not yet implemented: LFS and auxiliary collectors (8), retention and local/remote deletion (9), legacy adoption (10), provider bucket-policy/lifecycle automation, and the event-bus publisher/consumer that will deliver persisted outbox facts. No code claims those capabilities.
+Not yet implemented: provider-API auxiliary collectors (none approved), retention and local/remote
+deletion (9), legacy adoption (10), provider bucket-policy/lifecycle automation, and the event-bus
+publisher/consumer that will deliver persisted outbox facts. No code claims those capabilities.

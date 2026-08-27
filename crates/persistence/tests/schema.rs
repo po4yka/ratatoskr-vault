@@ -15,14 +15,15 @@ use ratatoskr_vault_persistence::Database;
 use ratatoskr_vault_persistence::test_support::TestDatabase;
 use uuid::Uuid;
 
-/// The fifteen tables `docs/ARCHITECTURE.md` section 4 names, and no others are required here.
-const REQUIRED_TABLES: [&str; 15] = [
+/// The sixteen tables `docs/ARCHITECTURE.md` section 4 names, and no others are required here.
+const REQUIRED_TABLES: [&str; 16] = [
     "targets",
     "desired_state_revisions",
     "mirrors",
     "sync_runs",
     "snapshots",
     "snapshot_artifacts",
+    "lfs_snapshot_objects",
     "manifests",
     "integrity_checks",
     "restore_drills",
@@ -170,4 +171,59 @@ async fn connect_refuses_an_unreachable_server() {
         result.is_err(),
         "a closed port must fail at connect time, not at first use"
     );
+}
+
+#[tokio::test]
+async fn collector_and_target_schema_is_closed_to_approved_lfs_and_wiki_shapes() {
+    let fixture = test_database().await;
+
+    let target_columns: Vec<String> = sqlx::query_scalar(
+        "select column_name from information_schema.columns
+         where table_schema = 'git_vault' and table_name = 'targets'
+           and column_name in ('target_kind', 'parent_target_id')
+         order by column_name",
+    )
+    .fetch_all(fixture.pool())
+    .await
+    .expect("target shape inventory must query");
+    assert_eq!(
+        target_columns,
+        ["parent_target_id", "target_kind"],
+        "repository/wiki relationship columns must exist"
+    );
+
+    let lfs_objects: Option<String> =
+        sqlx::query_scalar("select to_regclass('git_vault.lfs_snapshot_objects')::text")
+            .fetch_one(fixture.pool())
+            .await
+            .expect("LFS object table inventory must query");
+    assert!(
+        lfs_objects.is_some(),
+        "snapshot LFS object links must exist"
+    );
+
+    let collector_constraint: String = sqlx::query_scalar(
+        "select pg_get_constraintdef(oid)
+         from pg_constraint
+         where conname = 'collector_runs_collector_is_known'",
+    )
+    .fetch_one(fixture.pool())
+    .await
+    .expect("collector vocabulary constraint must exist");
+    assert!(collector_constraint.contains("'git_lfs'::text"));
+    assert!(collector_constraint.contains("'wiki'::text"));
+    for forbidden in [
+        "releases",
+        "issues",
+        "pull_requests",
+        "discussions",
+        "settings",
+    ] {
+        assert!(
+            !collector_constraint.contains(forbidden),
+            "unapproved collector {forbidden} remains executable in the schema"
+        );
+    }
+
+    fixture.cleanup().await.expect("cleanup");
 }

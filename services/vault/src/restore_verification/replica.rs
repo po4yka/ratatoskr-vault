@@ -90,13 +90,13 @@ impl RestoreDrill {
             .execute(&run_root.join("repository"), verification, &download_store)
             .await
         {
-            Ok((mut stages, refs)) => {
+            Ok((mut stages, refs, lfs)) => {
                 stages.insert(0, acquisition_stage);
-                Ok((stages, refs))
+                Ok((stages, refs, lfs))
             }
-            Err((mut stages, failure, refs)) => {
+            Err((mut stages, failure, refs, lfs)) => {
                 stages.insert(0, acquisition_stage);
-                Err((stages, failure, refs))
+                Err((stages, failure, refs, lfs))
             }
         }
     }
@@ -111,6 +111,7 @@ fn acquisition_failure(started: Instant, failure: VerificationFailure) -> DrillR
         }],
         failure,
         Vec::new(),
+        None,
     ))
 }
 

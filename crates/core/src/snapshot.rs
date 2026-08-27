@@ -42,6 +42,9 @@ pub enum ManifestError {
     /// Canonical manifest serialization failed.
     #[error("manifest serialization failed")]
     Serialization,
+    /// Git LFS evidence is non-canonical, duplicated, or disagrees with its `BlobRef`.
+    #[error("manifest Git LFS evidence is invalid")]
+    InvalidLfsEvidence,
     /// A parent manifest could not be resolved from immutable storage.
     #[error("manifest in digest chain is missing")]
     MissingManifest,
@@ -97,6 +100,7 @@ struct UnsignedManifest<'a> {
     created_at: &'a str,
     parent_manifest: &'a Option<BlobRef>,
     bundles: &'a [BlobRef],
+    lfs: &'a Option<LfsEvidence>,
     ref_set_sha256: &'a str,
     signing_key_id: &'a str,
 }
@@ -131,6 +135,8 @@ pub struct SnapshotManifest {
     pub parent_manifest: Option<BlobRef>,
     /// Full bundle `BlobRefs`.
     pub bundles: Vec<BlobRef>,
+    /// Complete Git LFS object evidence when explicitly collected.
+    pub lfs: Option<LfsEvidence>,
     /// SHA-256 digest of canonical refs.
     pub ref_set_sha256: String,
     /// SHA-256 identifier of the Ed25519 public key that signed this manifest.
@@ -149,6 +155,48 @@ pub struct RefEvidence {
     pub oid: String,
 }
 
+/// Canonical complete Git LFS collection evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LfsEvidence {
+    /// Exact Git LFS client version used for collection.
+    pub tool_version: String,
+    /// Referenced objects, intended to be ordered by OID.
+    pub objects: Vec<LfsObjectEvidence>,
+    /// Sum of all object byte lengths.
+    pub total_bytes: u64,
+    /// SHA-256 of canonical `oid size blob-digest` records.
+    pub aggregate_sha256: String,
+}
+
+/// One immutable Git LFS object named by the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LfsObjectEvidence {
+    /// Lowercase SHA-256 object identifier from the LFS pointer.
+    pub oid: String,
+    /// Vault-owned content-addressed object bytes.
+    pub blob: BlobRef,
+}
+
+impl LfsEvidence {
+    /// Builds aggregate evidence from the observed object order.
+    #[must_use]
+    pub fn new(tool_version: String, mut objects: Vec<LfsObjectEvidence>) -> Self {
+        objects.sort_by(|left, right| left.oid.cmp(&right.oid));
+        let total_bytes = objects.iter().fold(0_u64, |total, object| {
+            total.saturating_add(object.blob.size_bytes)
+        });
+        let aggregate_sha256 = canonical_lfs_digest(&objects);
+        Self {
+            tool_version,
+            objects,
+            total_bytes,
+            aggregate_sha256,
+        }
+    }
+}
+
 impl SnapshotManifest {
     /// Builds and signs a canonically ordered manifest from full ref evidence.
     ///
@@ -160,9 +208,13 @@ impl SnapshotManifest {
         bundles: Vec<BlobRef>,
         parent_manifest: Option<BlobRef>,
         created_at: String,
+        lfs: Option<LfsEvidence>,
         signer: &ManifestSigningKey,
     ) -> Result<Self, ManifestError> {
         refs.sort_by(|left, right| left.name.cmp(&right.name));
+        if lfs.as_ref().is_some_and(|evidence| !valid_lfs(evidence)) {
+            return Err(ManifestError::InvalidLfsEvidence);
+        }
         let ref_set_sha256 = canonical_ref_digest(&refs);
         let verification_key = signer.verification_key();
         let mut manifest = Self {
@@ -172,6 +224,7 @@ impl SnapshotManifest {
             created_at,
             parent_manifest,
             bundles,
+            lfs,
             ref_set_sha256,
             signing_key_id: verification_key.key_id,
             signature: String::new(),
@@ -179,6 +232,12 @@ impl SnapshotManifest {
         let unsigned = manifest.unsigned_bytes()?;
         manifest.signature = encode_hex(signer.key_pair.sign(&unsigned).as_ref());
         Ok(manifest)
+    }
+
+    /// Whether this v1 manifest carries a complete explicitly enabled LFS component.
+    #[must_use]
+    pub const fn includes_lfs(&self) -> bool {
+        self.lfs.is_some()
     }
 
     /// Verifies this manifest against the supplied trusted keys.
@@ -210,11 +269,56 @@ impl SnapshotManifest {
             created_at: &self.created_at,
             parent_manifest: &self.parent_manifest,
             bundles: &self.bundles,
+            lfs: &self.lfs,
             ref_set_sha256: &self.ref_set_sha256,
             signing_key_id: &self.signing_key_id,
         })
         .map_err(|_| ManifestError::Serialization)
     }
+}
+
+fn valid_lfs(evidence: &LfsEvidence) -> bool {
+    if evidence.tool_version.is_empty()
+        || evidence.total_bytes
+            != evidence.objects.iter().fold(0_u64, |total, object| {
+                total.saturating_add(object.blob.size_bytes)
+            })
+        || evidence.aggregate_sha256 != canonical_lfs_digest(&evidence.objects)
+    {
+        return false;
+    }
+    let mut previous = None;
+    for object in &evidence.objects {
+        if object.oid != object.blob.sha256
+            || object.oid.len() != 64
+            || !object
+                .oid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || object.blob.owner != "ratatoskr-vault"
+            || object.blob.media_type != "application/octet-stream"
+            || previous.is_some_and(|value| value >= object.oid.as_str())
+        {
+            return false;
+        }
+        previous = Some(object.oid.as_str());
+    }
+    true
+}
+
+/// Computes the aggregate digest for ordered LFS object evidence.
+#[must_use]
+pub fn canonical_lfs_digest(objects: &[LfsObjectEvidence]) -> String {
+    let mut digest = Sha256::new();
+    for object in objects {
+        digest.update(object.oid.as_bytes());
+        digest.update(b" ");
+        digest.update(object.blob.size_bytes.to_string().as_bytes());
+        digest.update(b" ");
+        digest.update(object.blob.sha256.as_bytes());
+        digest.update(b"\n");
+    }
+    format!("{:x}", digest.finalize())
 }
 
 impl ManifestSigningKey {

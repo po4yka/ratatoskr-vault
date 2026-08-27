@@ -48,6 +48,8 @@ create table git_vault.targets (
     target_id             uuid        primary key,
     provider              text        not null,
     external_repository_id text       not null,
+    target_kind           text        not null default 'repository',
+    parent_target_id      uuid        references git_vault.targets (target_id),
     status                text        not null,
     pinned                boolean     not null default false,
     created_at            timestamptz not null,
@@ -57,6 +59,13 @@ create table git_vault.targets (
         check (provider in ('github')),
     constraint targets_external_repository_id_is_bounded
         check (length(external_repository_id) between 1 and 255),
+    constraint targets_kind_is_known
+        check (target_kind in ('repository', 'wiki')),
+    constraint targets_parent_shape_is_consistent
+        check (
+            (target_kind = 'repository' and parent_target_id is null)
+            or (target_kind = 'wiki' and parent_target_id is not null and parent_target_id <> target_id)
+        ),
     -- The target state machine, AGENTS.md "Target and snapshot state machines".
     constraint targets_status_is_known
         check (status in (
@@ -79,8 +88,12 @@ comment on column git_vault.targets.status is
     'paused | excluded | deleting';
 
 -- One provider repository is at most one target, so reconciliation of duplicate events converges.
-create unique index targets_provider_external_id_key
-    on git_vault.targets (provider, external_repository_id);
+create unique index targets_repository_provider_external_id_key
+    on git_vault.targets (provider, external_repository_id)
+    where target_kind = 'repository';
+create unique index targets_one_wiki_per_parent_key
+    on git_vault.targets (parent_target_id)
+    where target_kind = 'wiki';
 
 -- ---------------------------------------------------------------------------------------------
 -- The target transition guard
@@ -412,13 +425,27 @@ create table git_vault.snapshot_artifacts (
     created_at      timestamptz not null,
 
     constraint snapshot_artifacts_kind_is_known
-        check (kind in ('git_bundle', 'manifest', 'lfs_archive'))
+        check (kind in ('git_bundle', 'manifest', 'lfs_object'))
 );
 
 comment on table git_vault.snapshot_artifacts is
     'Content-addressed bytes. The hash is computed while streaming and verified again after every '
     'transfer; a successful upload response alone never updates anything here.';
 create index snapshot_artifacts_snapshot_idx on git_vault.snapshot_artifacts (snapshot_id);
+
+create table git_vault.lfs_snapshot_objects (
+    snapshot_id      uuid   not null references git_vault.snapshots (snapshot_id),
+    artifact_id      uuid   not null unique references git_vault.snapshot_artifacts (artifact_id),
+    oid              text   not null check (oid ~ '^[0-9a-f]{64}$'),
+    sha256_hash      bytea  not null check (length(sha256_hash) = 32),
+    size_bytes       bigint not null check (size_bytes >= 0),
+
+    constraint lfs_snapshot_objects_key primary key (snapshot_id, oid)
+);
+
+comment on table git_vault.lfs_snapshot_objects is
+    'Immutable one-to-many evidence linking a signed snapshot to every individually stored and '
+    'content-verified Git LFS object it requires.';
 
 -- ---------------------------------------------------------------------------------------------
 -- manifests: the immutable evidence document describing a snapshot
@@ -494,6 +521,12 @@ create table git_vault.restore_drills (
     failure_class            text,
     refs_matched             boolean     not null,
     lfs_restored             boolean,
+    expected_lfs_object_count bigint,
+    observed_lfs_object_count bigint,
+    expected_lfs_bytes       bigint,
+    observed_lfs_bytes       bigint,
+    expected_lfs_aggregate_hash bytea,
+    observed_lfs_aggregate_hash bytea,
     duration_millis          bigint      not null check (duration_millis >= 0),
     stages                   jsonb       not null check (jsonb_typeof(stages) = 'array'),
     expected_ref_count       bigint      not null check (expected_ref_count >= 0),
@@ -520,7 +553,19 @@ create table git_vault.restore_drills (
     constraint restore_drills_isolation_is_proven
         check (network_disabled and not live_mirror_accessed),
     constraint restore_drills_times_are_ordered
-        check (started_at <= finished_at)
+        check (started_at <= finished_at),
+    constraint restore_drills_lfs_evidence_is_consistent
+        check (
+            (lfs_restored is null
+                and expected_lfs_object_count is null and observed_lfs_object_count is null
+                and expected_lfs_bytes is null and observed_lfs_bytes is null
+                and expected_lfs_aggregate_hash is null and observed_lfs_aggregate_hash is null)
+            or (lfs_restored is not null
+                and expected_lfs_object_count >= 0 and observed_lfs_object_count >= 0
+                and expected_lfs_bytes >= 0 and observed_lfs_bytes >= 0
+                and length(expected_lfs_aggregate_hash) = 32
+                and length(observed_lfs_aggregate_hash) = 32)
+        )
 );
 
 comment on table git_vault.restore_drills is
@@ -549,6 +594,10 @@ create trigger integrity_checks_are_append_only
 
 create trigger restore_drills_are_append_only
     before update or delete on git_vault.restore_drills
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
+
+create trigger lfs_snapshot_objects_are_append_only
+    before update or delete on git_vault.lfs_snapshot_objects
     for each row execute function git_vault.reject_terminal_evidence_mutation();
 
 -- ---------------------------------------------------------------------------------------------
@@ -755,28 +804,58 @@ create trigger replication_attempts_guard_delete
 -- ---------------------------------------------------------------------------------------------
 
 create table git_vault.collector_runs (
-    collector_run_id uuid       primary key,
-    snapshot_id     uuid        not null references git_vault.snapshots (snapshot_id),
-    collector       text        not null,
-    completeness    text        not null,
-    object_count    bigint      not null default 0 check (object_count >= 0),
-    total_bytes     bigint      not null default 0 check (total_bytes >= 0),
-    ran_at          timestamptz not null,
+    collector_run_id       uuid        primary key,
+    target_id             uuid        not null references git_vault.targets (target_id),
+    collector             text        not null,
+    outcome               text        not null,
+    mirror_lifecycle_run_id uuid       references git_vault.mirror_lifecycle_runs (run_id),
+    snapshot_id           uuid        references git_vault.snapshots (snapshot_id),
+    child_target_id       uuid        references git_vault.targets (target_id),
+    tool_version          text,
+    object_count          bigint      not null default 0 check (object_count >= 0),
+    total_bytes           bigint      not null default 0 check (total_bytes >= 0),
+    aggregate_hash        bytea       check (aggregate_hash is null or length(aggregate_hash) = 32),
+    failure_class         text,
+    ran_at                timestamptz not null,
 
     constraint collector_runs_collector_is_known
-        check (collector in (
-            'git_lfs', 'wiki', 'releases', 'issues', 'pull_requests', 'discussions', 'settings'
-        )),
-    -- Partial success is preserved honestly: a missing release asset does not erase the run.
-    constraint collector_runs_completeness_is_known
-        check (completeness in ('complete', 'partial', 'failed'))
+        check (collector in ('git_lfs', 'wiki')),
+    constraint collector_runs_outcome_is_known
+        check (outcome in ('complete', 'absent', 'incomplete', 'failed')),
+    constraint collector_runs_terminal_evidence_is_consistent
+        check (
+            (outcome = 'complete' and failure_class is null)
+            or (outcome = 'absent' and collector = 'wiki' and failure_class is null
+                and child_target_id is null)
+            or (outcome in ('incomplete', 'failed') and failure_class is not null)
+        ),
+    constraint collector_runs_lfs_shape_is_consistent
+        check (
+            collector <> 'git_lfs'
+            or (mirror_lifecycle_run_id is not null and child_target_id is null
+                and tool_version is not null
+                and (outcome <> 'complete' or aggregate_hash is not null))
+        ),
+    constraint collector_runs_wiki_shape_is_consistent
+        check (
+            collector <> 'wiki'
+            or (mirror_lifecycle_run_id is null and snapshot_id is null
+                and tool_version is null and object_count = 0 and total_bytes = 0
+                and aggregate_hash is null)
+        )
 );
 
 comment on table git_vault.collector_runs is
     'A complete archive is a manifest of independent collectors, not one opaque command. Each run '
     'records its own completeness so partial success is visible instead of silently upgrading the '
     'snapshot to a completeness it does not have.';
-create index collector_runs_snapshot_idx on git_vault.collector_runs (snapshot_id);
+create index collector_runs_target_ran_idx on git_vault.collector_runs (target_id, ran_at desc);
+create index collector_runs_snapshot_idx
+    on git_vault.collector_runs (snapshot_id) where snapshot_id is not null;
+
+create trigger collector_runs_are_append_only
+    before update or delete on git_vault.collector_runs
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
 
 -- ---------------------------------------------------------------------------------------------
 -- outbox: events Vault owes the bus, written in the same transaction as their cause

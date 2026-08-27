@@ -95,17 +95,10 @@ fn main() -> ExitCode {
         // Never terminate on its own: records its pid, then waits for stdin forever,
         // exercising the runner deadline and the kill that must follow it.
         "hang" => {
-            std::fs::write("probe-pid", format!("{}\n", std::process::id()))
-                .expect("probe pid file must be writable");
-            let mut sink = [0_u8; 4096];
-            loop {
-                let read = std::io::stdin().read(&mut sink).unwrap_or(0);
-                if read == 0 {
-                    // EOF: stdin closed. In a real hang the pipe stays open; treat EOF as
-                    // exit to avoid spinning.
-                    break;
-                }
-            }
+            hang_parent();
+        }
+        "hang-with-descendant" => {
+            hang_with_descendant();
         }
         // Emit `bytes` pattern bytes (or the literal `text`) on the requested stream(s).
         "emit" => {
@@ -135,4 +128,36 @@ fn main() -> ExitCode {
     } else {
         ExitCode::from(u8::try_from(exit_code).unwrap_or(1))
     }
+}
+
+fn hang_parent() {
+    std::fs::write("probe-pid", format!("{}\n", std::process::id()))
+        .expect("probe pid file must be writable");
+    let mut sink = [0_u8; 4096];
+    loop {
+        let read = std::io::stdin().read(&mut sink).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+    }
+}
+
+fn hang_with_descendant() {
+    std::fs::write("probe-pid", format!("{}\n", std::process::id()))
+        .expect("probe pid file must be writable");
+    let mut descendant = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .expect("probe descendant must start");
+    std::fs::write("probe-descendant-pid", format!("{}\n", descendant.id()))
+        .expect("descendant pid file must be writable");
+    let mut sink = [0_u8; 4096];
+    loop {
+        let read = std::io::stdin().read(&mut sink).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+    }
+    let _ignored = descendant.kill();
+    let _ignored = descendant.wait();
 }

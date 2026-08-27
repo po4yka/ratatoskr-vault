@@ -24,16 +24,20 @@ pub mod confine;
 mod credentials;
 pub mod env;
 pub mod error;
+pub mod lfs;
 pub mod outcome;
 mod spawn;
 pub mod url;
+pub mod wiki;
 
 pub use command::{GitOperation, Subcommand};
 pub use confine::ConfinedPath;
 pub use credentials::Credentials;
 pub use error::GitRunnerError;
+pub use lfs::{LfsOperation, LfsRunConfig, LfsRunner, LfsRunnerError, LfsTransferMode};
 pub use outcome::RunOutcome;
 pub use url::SourceUrl;
+pub use wiki::WikiProbeResult;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

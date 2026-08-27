@@ -7,7 +7,8 @@
 5. Create full Git bundles and immutable manifests in local BlobStore. *(implemented)*
 6. Verify bundles/hashes and execute isolated restore drills. *(implemented)*
 7. Add off-host S3-compatible replicas and verification. *(implemented)*
-8. Add Git LFS, wiki, then separately approved auxiliary collectors.
+8. Add Git LFS, wiki, then separately approved auxiliary collectors. *(implemented: LFS and wiki;
+   the approval gate exists and no provider-API auxiliary collector is approved or implemented)*
 9. Implement retention, pinning, tombstones, staged deletion, and audit.
 10. Adopt legacy mirrors, verify/re-snapshot, and cut over from legacy jobs.
 

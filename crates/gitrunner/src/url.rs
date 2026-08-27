@@ -54,6 +54,30 @@ impl SourceUrl {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Derives the provider wiki sibling from an already validated repository URL.
+    ///
+    /// # Errors
+    ///
+    /// Refuses URLs that do not end in one unambiguous `.git` repository path.
+    pub fn wiki_sibling(&self) -> Result<Self, GitRunnerError> {
+        let Some((base, suffix)) = self.0.rsplit_once('.') else {
+            return Err(GitRunnerError::InvalidSourceUrl {
+                reason: "repository URL must end with `.git`".to_owned(),
+            });
+        };
+        if self.0.contains(['?', '#']) || suffix != "git" {
+            return Err(GitRunnerError::InvalidSourceUrl {
+                reason: "repository URL must end with `.git` and carry no query or fragment"
+                    .to_owned(),
+            });
+        }
+        Self::parse(&format!("{base}.wiki.git"))
+    }
+
+    pub(crate) fn is_file(&self) -> bool {
+        self.0.starts_with("file://")
+    }
 }
 
 #[cfg(test)]

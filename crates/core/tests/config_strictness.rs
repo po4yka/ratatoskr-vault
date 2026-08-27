@@ -253,6 +253,42 @@ fn mirror_lifecycle_budget_requires_finite_positive_limits() {
 }
 
 #[test]
+fn lfs_settings_require_absolute_binary_and_finite_bounded_limits() {
+    let error = config::load_from(
+        config::figment()
+            .merge(Serialized::default(
+                "mirror.root",
+                "/var/lib/ratatoskr/mirrors",
+            ))
+            .merge(Serialized::default(
+                "mirror.work_root",
+                "/var/lib/ratatoskr/work",
+            ))
+            .merge(Serialized::default("mirror.per_mirror_max_bytes", 1024_u64))
+            .merge(Serialized::default("mirror.global_max_bytes", 4096_u64))
+            .merge(Serialized::default(
+                "mirror.max_concurrent_operations",
+                4_u8,
+            ))
+            .merge(Serialized::default("lfs.binary", "git-lfs"))
+            .merge(Serialized::default("lfs.stage_max_bytes", 8192_u64))
+            .merge(Serialized::default("lfs.max_objects", 0_u32))
+            .merge(Serialized::default("lfs.operation_timeout_seconds", 0_u64)),
+    )
+    .expect_err("unsafe LFS execution settings must be rejected");
+
+    let report = error.report();
+    for key in [
+        "lfs.binary",
+        "lfs.stage_max_bytes",
+        "lfs.max_objects",
+        "lfs.operation_timeout_seconds",
+    ] {
+        assert!(report.contains(key), "the report must name {key}\n{report}");
+    }
+}
+
+#[test]
 fn verification_policy_rejects_zero_budgets_overlapping_roots_and_bad_keys() {
     use std::collections::BTreeMap;
 

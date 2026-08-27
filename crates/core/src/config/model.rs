@@ -39,6 +39,10 @@ pub struct VaultConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<MirrorLifecycleConfig>,
 
+    /// Explicit Git LFS executable and finite per-run collection limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<LfsConfig>,
+
     /// Signed-manifest verification and finite isolated restore-drill policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationConfig>,
@@ -67,6 +71,7 @@ impl VaultConfig {
                 grace_seconds: default_grace_seconds(),
             },
             mirror: None,
+            lfs: None,
             verification: None,
             replicas: None,
             telemetry: TelemetryConfig {
@@ -225,6 +230,20 @@ pub struct MirrorLifecycleConfig {
     /// `RATATOSKR__MIRROR__MAX_CONCURRENT_OPERATIONS`: exactly four on the four-core host.
     #[serde(default = "default_max_concurrent_mirror_operations")]
     pub max_concurrent_operations: u8,
+}
+
+/// Git LFS process identity and finite staging limits.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LfsConfig {
+    /// Absolute path to the allowlisted `git-lfs` executable.
+    pub binary: PathBuf,
+    /// Maximum bytes admitted in one run-owned LFS staging directory.
+    pub stage_max_bytes: u64,
+    /// Maximum referenced LFS objects admitted by one collection.
+    pub max_objects: u32,
+    /// Hard wall-clock deadline for one Git LFS operation.
+    pub operation_timeout_seconds: u64,
 }
 
 /// Current signed-manifest verification and restore-drill policy.

@@ -2,11 +2,79 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, reason = "test assertions")]
 
-use ratatoskr_vault_core::snapshot::BlobRef;
+use ratatoskr_vault_core::snapshot::{BlobRef, LfsEvidence, LfsObjectEvidence};
 use ratatoskr_vault_persistence::test_support::TestDatabase;
 use ratatoskr_vault_persistence::{ReplicaTargetObservation, SnapshotSource};
 use std::time::Duration;
 use uuid::Uuid;
+
+#[tokio::test]
+async fn required_replication_inventory_includes_every_manifest_lfs_object() {
+    let fixture = TestDatabase::create().await.expect("disposable database");
+    let lfs = LfsEvidence::new(
+        "git-lfs/fixture".to_owned(),
+        vec![
+            LfsObjectEvidence {
+                oid: "3".repeat(64),
+                blob: blob("3", "application/octet-stream"),
+            },
+            LfsObjectEvidence {
+                oid: "4".repeat(64),
+                blob: blob("4", "application/octet-stream"),
+            },
+        ],
+    );
+    let snapshot_id = fixture
+        .database
+        .record_built_snapshot(
+            healthy_source(&fixture).await,
+            None,
+            &blob("1", "application/vnd.git.bundle"),
+            &blob("2", "application/json"),
+            &"5".repeat(64),
+            Some(&lfs),
+        )
+        .await
+        .expect("LFS snapshot");
+    let replica_target_id = Uuid::now_v7();
+    fixture
+        .database
+        .observe_replica_target(&ReplicaTargetObservation {
+            replica_target_id,
+            name: "lfs-offsite".to_owned(),
+            endpoint_origin: "https://s3.example.invalid".to_owned(),
+            bucket: "vault".to_owned(),
+            key_prefix: "archive".to_owned(),
+            required: true,
+            enabled: true,
+        })
+        .await
+        .expect("replica target");
+
+    let due = fixture
+        .database
+        .due_replication_units(replica_target_id, 0, 8)
+        .await
+        .expect("complete inventory");
+    assert_eq!(
+        due.len(),
+        4,
+        "bundle, manifest, and both LFS objects are due"
+    );
+    assert!(due.iter().all(|unit| unit.snapshot_id == snapshot_id));
+    let digests: std::collections::BTreeSet<_> =
+        due.iter().map(|unit| unit.blob.sha256.clone()).collect();
+    assert_eq!(
+        digests,
+        std::collections::BTreeSet::from([
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+        ])
+    );
+    fixture.cleanup().await.expect("cleanup");
+}
 
 #[tokio::test]
 async fn replica_inventory_records_location_and_rejects_terminal_rewrite() {
@@ -257,6 +325,31 @@ async fn expired_claim_is_recoverable_without_duplicate_live_attempt() {
 }
 
 async fn stored_bundle(fixture: &TestDatabase) -> Uuid {
+    let source = healthy_source(fixture).await;
+    let bundle = blob("1", "application/vnd.git.bundle");
+    let snapshot_id = fixture
+        .database
+        .record_built_snapshot(
+            source,
+            None,
+            &bundle,
+            &blob("2", "application/json"),
+            &"3".repeat(64),
+            None,
+        )
+        .await
+        .expect("snapshot");
+    sqlx::query_scalar(
+        "select artifact_id from git_vault.snapshot_artifacts
+         where snapshot_id = $1 and kind = 'git_bundle'",
+    )
+    .bind(snapshot_id)
+    .fetch_one(fixture.pool())
+    .await
+    .expect("bundle artifact")
+}
+
+async fn healthy_source(fixture: &TestDatabase) -> SnapshotSource {
     let source = SnapshotSource {
         target_id: Uuid::now_v7(),
         mirror_id: Uuid::now_v7(),
@@ -293,26 +386,7 @@ async fn stored_bundle(fixture: &TestDatabase) -> Uuid {
     .execute(fixture.pool())
     .await
     .expect("mirror run");
-    let bundle = blob("1", "application/vnd.git.bundle");
-    let snapshot_id = fixture
-        .database
-        .record_built_snapshot(
-            source,
-            None,
-            &bundle,
-            &blob("2", "application/json"),
-            &"3".repeat(64),
-        )
-        .await
-        .expect("snapshot");
-    sqlx::query_scalar(
-        "select artifact_id from git_vault.snapshot_artifacts
-         where snapshot_id = $1 and kind = 'git_bundle'",
-    )
-    .bind(snapshot_id)
-    .fetch_one(fixture.pool())
-    .await
-    .expect("bundle artifact")
+    source
 }
 
 fn blob(digit: &str, media_type: &str) -> BlobRef {

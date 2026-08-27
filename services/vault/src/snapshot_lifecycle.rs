@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ratatoskr_vault_blobstore::LocalBlobStore;
-use ratatoskr_vault_core::snapshot::{BlobRef, ManifestSigningKey, RefEvidence, SnapshotManifest};
+use ratatoskr_vault_core::snapshot::{
+    BlobRef, LfsEvidence, ManifestSigningKey, RefEvidence, SnapshotManifest,
+};
 use ratatoskr_vault_gitrunner::{ConfinedPath, GitOperation, GitRunner, RunConfig, Subcommand};
 use ratatoskr_vault_persistence::{Database, SnapshotSource};
 use uuid::Uuid;
@@ -98,6 +100,7 @@ impl SnapshotLifecycle {
         &self,
         request: SnapshotRequest,
         mirror: &Path,
+        lfs: Option<LfsEvidence>,
     ) -> Result<SnapshotResult, String> {
         let source = SnapshotSource::from(request);
         let parent = self
@@ -117,6 +120,7 @@ impl SnapshotLifecycle {
                 mirror,
                 &run_root,
                 parent.as_ref().map(|value| value.manifest.clone()),
+                lfs,
             )
             .await;
         let _ignored = std::fs::remove_dir_all(&run_root);
@@ -129,6 +133,7 @@ impl SnapshotLifecycle {
                 &bundle,
                 &manifest,
                 &evidence.ref_set_sha256,
+                evidence.lfs.as_ref(),
             )
             .await
             .map_err(|error| format!("snapshot persistence failed: {error:?}"))?;
@@ -145,6 +150,7 @@ impl SnapshotLifecycle {
         mirror: &Path,
         run_root: &Path,
         parent_manifest: Option<BlobRef>,
+        lfs: Option<LfsEvidence>,
     ) -> Result<(BlobRef, BlobRef, SnapshotManifest), String> {
         let staged_bundle = run_root.join("snapshot.bundle");
         let relative = staged_bundle
@@ -187,6 +193,7 @@ impl SnapshotLifecycle {
             vec![bundle_ref.clone()],
             parent_manifest,
             utc_timestamp()?,
+            lfs,
             &self.settings.manifest_signer,
         )
         .map_err(|error| error.to_string())?;

@@ -32,6 +32,13 @@ async fn failed_drill_report_and_alert_fact_commit_atomically_and_remain_immutab
         observed_ref_count: 2,
         expected_ref_set_sha256: "3".repeat(64),
         observed_ref_set_sha256: "4".repeat(64),
+        lfs_restored: None,
+        expected_lfs_object_count: None,
+        observed_lfs_object_count: None,
+        expected_lfs_bytes: None,
+        observed_lfs_bytes: None,
+        expected_lfs_aggregate_sha256: None,
+        observed_lfs_aggregate_sha256: None,
         network_disabled: true,
         live_mirror_accessed: false,
     };
@@ -180,6 +187,13 @@ fn drill_report(snapshot_id: Uuid, outcome: EvidenceOutcome) -> StoredRestoreDri
         } else {
             "4".repeat(64)
         },
+        lfs_restored: None,
+        expected_lfs_object_count: None,
+        observed_lfs_object_count: None,
+        expected_lfs_bytes: None,
+        observed_lfs_bytes: None,
+        expected_lfs_aggregate_sha256: None,
+        observed_lfs_aggregate_sha256: None,
         network_disabled: true,
         live_mirror_accessed: false,
     }
@@ -195,6 +209,7 @@ async fn persisted_snapshot(fixture: &TestDatabase) -> Uuid {
             &blob("1", "application/vnd.git.bundle"),
             &blob("2", "application/json"),
             &"3".repeat(64),
+            None,
         )
         .await
         .expect("snapshot evidence")

@@ -72,6 +72,7 @@ pub(crate) fn validate(config: &VaultConfig) -> Vec<Violation> {
     found.extend(database_violations(config));
     found.extend(otlp_violations(config));
     found.extend(mirror_violations(config));
+    found.extend(lfs_violations(config));
     found.extend(verification_violations(config));
     found.extend(replica_violations(config));
 
@@ -321,6 +322,51 @@ fn mirror_violations(config: &VaultConfig) -> Vec<Violation> {
             key: "mirror.max_concurrent_operations",
             env_var: "RATATOSKR__MIRROR__MAX_CONCURRENT_OPERATIONS",
             rule: "must equal 4, the deployment target's four CPU cores",
+        });
+    }
+
+    found
+}
+
+/// Git LFS is enabled only through an absolute binary and limits contained by mirror storage.
+fn lfs_violations(config: &VaultConfig) -> Vec<Violation> {
+    let mut found = Vec::new();
+    let Some(lfs) = config.lfs.as_ref() else {
+        return found;
+    };
+
+    if !lfs.binary.is_absolute() {
+        found.push(Violation {
+            key: "lfs.binary",
+            env_var: "RATATOSKR__LFS__BINARY",
+            rule: "must be an absolute path to the allowlisted git-lfs executable",
+        });
+    }
+
+    let stage_is_bounded = config.mirror.as_ref().is_some_and(|mirror| {
+        lfs.stage_max_bytes > 0
+            && lfs.stage_max_bytes <= mirror.per_mirror_max_bytes
+            && lfs.stage_max_bytes <= mirror.global_max_bytes
+    });
+    if !stage_is_bounded {
+        found.push(Violation {
+            key: "lfs.stage_max_bytes",
+            env_var: "RATATOSKR__LFS__STAGE_MAX_BYTES",
+            rule: "must be positive and no greater than configured per-mirror and global budgets",
+        });
+    }
+    if lfs.max_objects == 0 {
+        found.push(Violation {
+            key: "lfs.max_objects",
+            env_var: "RATATOSKR__LFS__MAX_OBJECTS",
+            rule: "must be a positive finite referenced-object limit",
+        });
+    }
+    if lfs.operation_timeout_seconds == 0 {
+        found.push(Violation {
+            key: "lfs.operation_timeout_seconds",
+            env_var: "RATATOSKR__LFS__OPERATION_TIMEOUT_SECONDS",
+            rule: "must be a positive finite process deadline",
         });
     }
 
