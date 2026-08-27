@@ -488,6 +488,8 @@ create table git_vault.restore_drills (
     drill_id                 uuid        primary key,
     snapshot_id              uuid        not null references git_vault.snapshots (snapshot_id),
     manifest_hash            bytea       not null check (length(manifest_hash) = 32),
+    source_kind              text        not null,
+    replica_target_id        uuid,
     outcome                  text        not null,
     failure_class            text,
     refs_matched             boolean     not null,
@@ -505,6 +507,11 @@ create table git_vault.restore_drills (
 
     constraint restore_drills_outcome_is_known
         check (outcome in ('passed', 'failed')),
+    constraint restore_drills_source_is_consistent
+        check (
+            (source_kind = 'local' and replica_target_id is null)
+            or (source_kind = 'replica' and replica_target_id is not null)
+        ),
     constraint restore_drills_terminal_evidence_is_consistent
         check (
             (outcome = 'passed' and failure_class is null and refs_matched)
@@ -607,6 +614,141 @@ comment on table git_vault.storage_locations is
     'different backend than the primary (docs/ARCHITECTURE.md section 13).';
 create unique index storage_locations_backend_root_key
     on git_vault.storage_locations (backend, root);
+
+-- ---------------------------------------------------------------------------------------------
+-- replica_targets, replication_attempts, replica_placements: off-host inventory and evidence
+-- ---------------------------------------------------------------------------------------------
+
+create table git_vault.replica_targets (
+    replica_target_id uuid        primary key,
+    name              text        not null unique,
+    endpoint_origin   text        not null,
+    bucket            text        not null,
+    key_prefix        text        not null,
+    required          boolean     not null,
+    enabled           boolean     not null,
+    first_seen_at     timestamptz not null,
+    last_seen_at      timestamptz not null,
+
+    constraint replica_targets_name_is_bounded
+        check (name ~ '^[a-z0-9][a-z0-9_-]{0,62}$'),
+    constraint replica_targets_endpoint_is_credential_free_origin
+        check (length(endpoint_origin) between 8 and 512
+            and endpoint_origin !~ '@'
+            and endpoint_origin !~ '[?#]'),
+    constraint replica_targets_bucket_is_bounded
+        check (length(bucket) between 1 and 255),
+    constraint replica_targets_key_prefix_is_safe
+        check (length(key_prefix) <= 255
+            and key_prefix !~ '(^|/)\.\.(/|$)'
+            and key_prefix !~ '^/'
+            and key_prefix !~ '/$'),
+    constraint replica_targets_observation_times_are_ordered
+        check (first_seen_at <= last_seen_at)
+);
+
+comment on table git_vault.replica_targets is
+    'Credential-free observations of named S3-compatible targets. Secrets exist only in process '
+    'environment and never enter this schema; first/last seen preserve operational history.';
+
+alter table git_vault.restore_drills
+    add constraint restore_drills_replica_target_fk
+    foreign key (replica_target_id)
+    references git_vault.replica_targets (replica_target_id);
+
+create table git_vault.replication_attempts (
+    attempt_id        uuid        primary key,
+    artifact_id       uuid        not null references git_vault.snapshot_artifacts (artifact_id),
+    replica_target_id uuid        not null references git_vault.replica_targets (replica_target_id),
+    outcome           text        not null,
+    failure_class     text,
+    lease_owner       uuid        not null,
+    lease_expires_at  timestamptz not null,
+    remote_hash       bytea       check (remote_hash is null or length(remote_hash) = 32),
+    remote_size_bytes bigint      check (remote_size_bytes is null or remote_size_bytes >= 0),
+    started_at        timestamptz not null,
+    finished_at       timestamptz,
+
+    constraint replication_attempts_outcome_is_known
+        check (outcome in ('running', 'succeeded', 'failed', 'abandoned')),
+    constraint replication_attempts_failure_class_is_bounded
+        check (failure_class is null or length(failure_class) between 1 and 64),
+    constraint replication_attempts_terminal_fields_are_consistent
+        check (
+            (outcome = 'running' and failure_class is null and remote_hash is null
+                and remote_size_bytes is null and finished_at is null)
+            or (outcome = 'succeeded' and failure_class is null and remote_hash is not null
+                and remote_size_bytes is not null and finished_at is not null)
+            or (outcome in ('failed', 'abandoned') and failure_class is not null
+                and remote_hash is null and remote_size_bytes is null and finished_at is not null)
+        ),
+    constraint replication_attempts_times_are_ordered
+        check (started_at <= lease_expires_at
+            and (finished_at is null or started_at <= finished_at))
+);
+
+comment on table git_vault.replication_attempts is
+    'One leased transfer or re-verification attempt. Terminal rows are immutable evidence; an '
+    'expired running row becomes abandoned and a retry receives a new attempt id.';
+
+create unique index replication_attempts_one_live_unit_key
+    on git_vault.replication_attempts (artifact_id, replica_target_id)
+    where outcome = 'running';
+create index replication_attempts_lease_recovery_idx
+    on git_vault.replication_attempts (lease_expires_at) where outcome = 'running';
+create index replication_attempts_unit_started_idx
+    on git_vault.replication_attempts (artifact_id, replica_target_id, started_at desc);
+
+create table git_vault.replica_placements (
+    placement_id      uuid        primary key,
+    artifact_id       uuid        not null references git_vault.snapshot_artifacts (artifact_id),
+    replica_target_id uuid        not null references git_vault.replica_targets (replica_target_id),
+    object_key        text        not null,
+    sha256_hash       bytea       not null check (length(sha256_hash) = 32),
+    size_bytes        bigint      not null check (size_bytes >= 0),
+    first_placed_at   timestamptz not null,
+    last_verified_at  timestamptz not null,
+    last_attempt_id   uuid        not null references git_vault.replication_attempts (attempt_id),
+
+    constraint replica_placements_object_key_is_content_derived
+        check (length(object_key) between 75 and 512
+            and object_key ~ '(^|/)sha256/[0-9a-f]{2}/[0-9a-f]{64}$'
+            and object_key !~ '(^|/)\.\.(/|$)'),
+    constraint replica_placements_times_are_ordered
+        check (first_placed_at <= last_verified_at),
+    constraint replica_placements_unit_key unique (artifact_id, replica_target_id)
+);
+
+comment on table git_vault.replica_placements is
+    'Current verified location of one immutable snapshot artifact at one target. The attempt '
+    'history remains append-only while this projection advances last_verified_at.';
+
+create function git_vault.guard_replication_attempt_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+    if tg_op = 'DELETE' or old.outcome <> 'running' then
+        raise exception 'terminal replication attempt evidence is append-only';
+    end if;
+    if new.attempt_id <> old.attempt_id
+        or new.artifact_id <> old.artifact_id
+        or new.replica_target_id <> old.replica_target_id
+        or new.lease_owner <> old.lease_owner
+        or new.lease_expires_at <> old.lease_expires_at
+        or new.started_at <> old.started_at then
+        raise exception 'replication attempt identity and lease are immutable';
+    end if;
+    return new;
+end;
+$$;
+
+create trigger replication_attempts_guard_update
+    before update on git_vault.replication_attempts
+    for each row execute function git_vault.guard_replication_attempt_mutation();
+create trigger replication_attempts_guard_delete
+    before delete on git_vault.replication_attempts
+    for each row execute function git_vault.guard_replication_attempt_mutation();
 
 -- ---------------------------------------------------------------------------------------------
 -- collector_runs: completeness of each auxiliary collection behind a complete archive

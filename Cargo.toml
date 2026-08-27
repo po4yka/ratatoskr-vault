@@ -41,9 +41,20 @@ sqlx = { version = "0.8.6", default-features = false, features = [
 ] }
 
 # ---- async runtime and HTTP ----
-tokio      = { version = "1.46", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+tokio      = { version = "1.46", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync", "fs", "io-util"] }
 axum       = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
 http       = "1.3"
+
+# ---- off-host object storage ----
+# Apache's provider-neutral client gives Vault one reviewed S3-compatible implementation. Only
+# S3, reqwest/rustls transport, and ring signing are enabled: no provider SDK, filesystem backend,
+# metadata credential discovery, or second native crypto stack.
+object_store = { version = "=0.14.1", default-features = false, features = ["aws-base", "reqwest", "ring"] }
+# Feature-unification selector for object_store's reqwest transport. It reuses the workspace's
+# existing rustls/ring provider and avoids OpenSSL and aws-lc-sys native build dependencies.
+reqwest = { version = "=0.13.1", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = "=0.3.34"
 
 # ---- configuration ----
 figment = { version = "0.10", features = ["env"] }

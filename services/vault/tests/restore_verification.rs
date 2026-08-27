@@ -2,12 +2,173 @@
 
 #![allow(clippy::expect_used, reason = "test assertions")]
 
+#[path = "../../../crates/blobstore/tests/support/mod.rs"]
+#[allow(
+    dead_code,
+    reason = "shared fixture exposes assertions used by blobstore tests"
+)]
+mod s3_support;
+
 use ratatoskr_vault::restore_verification::{
-    ArtifactVerifier, DeferralReason, ReportOutcome, RestoreDrill, RestoreDrillSettings,
-    ScheduleCandidate, VerificationFailure, VerificationPolicy, plan_due_snapshots,
+    ArtifactVerifier, DeferralReason, ReplicaRestoreCandidate, ReportOutcome, RestoreDrill,
+    RestoreDrillSettings, RestoreSource, RestoreSourcePolicy, ScheduleCandidate,
+    VerificationFailure, VerificationPolicy, plan_due_snapshots, select_restore_source,
 };
+
+#[test]
+fn replica_aware_drill_selection_prefers_complete_verified_replica() {
+    let older = Uuid::from_u128(1);
+    let preferred = Uuid::from_u128(2);
+    let incomplete = Uuid::from_u128(3);
+    let selected = select_restore_source(
+        RestoreSourcePolicy::ReplicaPreferred,
+        true,
+        100,
+        &[
+            ReplicaRestoreCandidate {
+                replica_target_id: older,
+                complete: true,
+                verified_at: 120,
+            },
+            ReplicaRestoreCandidate {
+                replica_target_id: incomplete,
+                complete: false,
+                verified_at: 200,
+            },
+            ReplicaRestoreCandidate {
+                replica_target_id: preferred,
+                complete: true,
+                verified_at: 180,
+            },
+        ],
+    )
+    .expect("a complete fresh replica is eligible");
+
+    assert_eq!(
+        selected,
+        RestoreSource::Replica {
+            replica_target_id: preferred
+        }
+    );
+}
+
+#[test]
+fn replica_required_selection_never_falls_back_to_local() {
+    let result = select_restore_source(
+        RestoreSourcePolicy::ReplicaRequired,
+        true,
+        100,
+        &[
+            ReplicaRestoreCandidate {
+                replica_target_id: Uuid::from_u128(1),
+                complete: false,
+                verified_at: 200,
+            },
+            ReplicaRestoreCandidate {
+                replica_target_id: Uuid::from_u128(2),
+                complete: true,
+                verified_at: 99,
+            },
+        ],
+    );
+
+    assert!(
+        result.is_err(),
+        "replica_required must defer explicitly instead of substituting local bytes: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn verified_replica_bundle_restores_exact_refs_from_downloaded_bytes() {
+    let fixture = S3Fixture::start().await;
+    let root = temporary_root();
+    let source = create_source_repository(&root);
+    let bundle_source = root.join("replica.bundle");
+    git(
+        &["bundle", "create", path_text(&bundle_source), "--all"],
+        &source,
+    );
+    let store =
+        LocalBlobStore::new(root.join("blobs"), 1_000_000).expect("fixture store must initialize");
+    let bundle = store
+        .reference_for_file(&bundle_source, "application/vnd.git.bundle".to_owned())
+        .expect("bundle reference");
+    store
+        .publish_file(&bundle, &bundle_source)
+        .expect("bundle publication");
+    let signer = ManifestSigningKey::from_seed([21; 32]).expect("fixture signing key");
+    let refs = git_output(&["show-ref"], &source)
+        .lines()
+        .map(|line| {
+            let (oid, name) = line.split_once(' ').expect("show-ref fixture line");
+            RefEvidence {
+                name: name.to_owned(),
+                oid: oid.to_owned(),
+            }
+        })
+        .collect();
+    let manifest = SnapshotManifest::new(
+        refs,
+        vec![bundle.clone()],
+        None,
+        "2026-08-27T00:00:00Z".to_owned(),
+        &signer,
+    )
+    .expect("signed fixture manifest");
+    let manifest_ref = publish_manifest(&store, &root, &manifest);
+    let verification = ArtifactVerifier::new(store.clone(), vec![signer.verification_key()], 16)
+        .verify(Uuid::now_v7(), manifest_ref.clone());
+    assert_eq!(verification.outcome, ReportOutcome::Passed);
+    let replica_target_id = Uuid::now_v7();
+    let replica = ReplicaStore::new("offsite".to_owned(), replica_target(fixture.endpoint()))
+        .expect("fixture replica store");
+    replica
+        .upload_and_verify(&bundle, &store.resolve(&bundle).expect("local bundle"))
+        .await
+        .expect("replicated bundle");
+    replica
+        .upload_and_verify(
+            &manifest_ref,
+            &store.resolve(&manifest_ref).expect("local manifest"),
+        )
+        .await
+        .expect("replicated manifest");
+    std::fs::remove_file(store.resolve(&bundle).expect("test-owned bundle"))
+        .expect("remove local bundle proof");
+    std::fs::remove_file(store.resolve(&manifest_ref).expect("test-owned manifest"))
+        .expect("remove local manifest proof");
+    let live_mirror_root = root.join("live-mirrors");
+    std::fs::create_dir_all(&live_mirror_root).expect("live mirror root");
+    let drill = RestoreDrill::new(
+        RestoreDrillSettings {
+            scratch_root: root.join("restore-scratch"),
+            live_mirror_root,
+            git_binary: std::path::PathBuf::from("/usr/bin/git"),
+            deadline: std::time::Duration::from_secs(30),
+        },
+        store,
+    )
+    .expect("fixture drill settings");
+
+    let report = drill
+        .run_from_replica(&verification, replica_target_id, &replica)
+        .await;
+
+    assert_eq!(report.outcome, ReportOutcome::Passed);
+    assert_eq!(report.source, RestoreSource::Replica { replica_target_id });
+    assert_eq!(
+        report.expected_ref_set_sha256,
+        report.observed_ref_set_sha256
+    );
+    assert_eq!(report.expected_ref_count, report.observed_ref_count);
+}
 use ratatoskr_vault_blobstore::LocalBlobStore;
+use ratatoskr_vault_blobstore::replica::ReplicaStore;
+use ratatoskr_vault_core::config::ReplicaTargetConfig;
 use ratatoskr_vault_core::snapshot::{ManifestSigningKey, RefEvidence, SnapshotManifest};
+use s3_support::S3Fixture;
+use secrecy::SecretString;
+use url::Url;
 use uuid::Uuid;
 
 #[test]
@@ -326,6 +487,27 @@ fn publish_manifest(
         .publish_file(&reference, &source)
         .expect("manifest publication");
     reference
+}
+
+fn replica_target(endpoint: &str) -> ReplicaTargetConfig {
+    ReplicaTargetConfig {
+        endpoint: Url::parse(endpoint).expect("fixture endpoint"),
+        bucket: "vault-fixtures".to_owned(),
+        region: "fixture-1".to_owned(),
+        key_prefix: "restore".to_owned(),
+        enabled: true,
+        required: true,
+        access_key: SecretString::from("fixture-access"),
+        secret_access_key: SecretString::from("fixture-secret"),
+        session_token: None,
+        connect_timeout_seconds: 2,
+        request_timeout_seconds: 10,
+        attempt_timeout_seconds: 5,
+        max_object_bytes: 1_000_000,
+        max_backlog_items: 8,
+        max_backlog_bytes: 8_000_000,
+        max_concurrent: 2,
+    }
 }
 
 fn create_source_repository(root: &std::path::Path) -> std::path::PathBuf {

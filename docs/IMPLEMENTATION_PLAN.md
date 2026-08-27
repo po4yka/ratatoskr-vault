@@ -1,12 +1,12 @@
 # Vault implementation plan
 
 1. Scaffold service, typed config, telemetry, errors, health, and `git_vault` schema. *(implemented)*
-2. Implement desired-state target reconciliation and state machine.
-3. Implement confined system-Git runner and generated hostile-repository tests.
-4. Implement mirror lifecycle with quotas, cancellation, and integrity checks.
-5. Create full Git bundles and immutable manifests in local BlobStore.
-6. Verify bundles/hashes and execute isolated restore drills.
-7. Add off-host S3-compatible replicas and verification.
+2. Implement desired-state target reconciliation and state machine. *(implemented)*
+3. Implement confined system-Git runner and generated hostile-repository tests. *(implemented)*
+4. Implement mirror lifecycle with quotas, cancellation, and integrity checks. *(implemented)*
+5. Create full Git bundles and immutable manifests in local BlobStore. *(implemented)*
+6. Verify bundles/hashes and execute isolated restore drills. *(implemented)*
+7. Add off-host S3-compatible replicas and verification. *(implemented)*
 8. Add Git LFS, wiki, then separately approved auxiliary collectors.
 9. Implement retention, pinning, tombstones, staged deletion, and audit.
 10. Adopt legacy mirrors, verify/re-snapshot, and cut over from legacy jobs.

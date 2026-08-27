@@ -5,7 +5,8 @@
 use ratatoskr_vault_core::snapshot::BlobRef;
 use ratatoskr_vault_persistence::test_support::TestDatabase;
 use ratatoskr_vault_persistence::{
-    EvidenceOutcome, SnapshotSource, StoredRestoreDrillReport, StoredVerificationReport,
+    EvidenceOutcome, SnapshotSource, StoredRestoreDrillReport, StoredRestoreSource,
+    StoredVerificationReport,
 };
 use uuid::Uuid;
 
@@ -18,6 +19,7 @@ async fn failed_drill_report_and_alert_fact_commit_atomically_and_remain_immutab
         drill_id,
         snapshot_id,
         manifest: blob("2", "application/json"),
+        source: StoredRestoreSource::Local,
         outcome: EvidenceOutcome::Failed,
         failure_class: Some("ref_mismatch".to_owned()),
         refs_matched: false,
@@ -40,21 +42,32 @@ async fn failed_drill_report_and_alert_fact_commit_atomically_and_remain_immutab
         .await
         .expect("failed drill evidence must commit");
 
-    let stored: (String, Option<String>, i64, i64, bool, bool) = sqlx::query_as(
-        "select outcome, failure_class, duration_millis, observed_ref_count,
-                network_disabled, live_mirror_accessed
+    let stored: (
+        String,
+        Option<Uuid>,
+        String,
+        Option<String>,
+        i64,
+        i64,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "select source_kind, replica_target_id, outcome, failure_class, duration_millis,
+                observed_ref_count, network_disabled, live_mirror_accessed
          from git_vault.restore_drills where drill_id = $1",
     )
     .bind(drill_id)
     .fetch_one(fixture.pool())
     .await
     .expect("terminal drill report");
-    assert_eq!(stored.0, "failed");
-    assert_eq!(stored.1.as_deref(), Some("ref_mismatch"));
-    assert_eq!(stored.2, 27);
-    assert_eq!(stored.3, 2);
-    assert!(stored.4);
-    assert!(!stored.5);
+    assert_eq!(stored.0, "local");
+    assert_eq!(stored.1, None);
+    assert_eq!(stored.2, "failed");
+    assert_eq!(stored.3.as_deref(), Some("ref_mismatch"));
+    assert_eq!(stored.4, 27);
+    assert_eq!(stored.5, 2);
+    assert!(stored.6);
+    assert!(!stored.7);
     let event: (String, Uuid, String) = sqlx::query_as(
         "select event_type, aggregate_id, payload->>'failure_class'
          from git_vault.outbox where aggregate_id = $1",
@@ -151,6 +164,7 @@ fn drill_report(snapshot_id: Uuid, outcome: EvidenceOutcome) -> StoredRestoreDri
         drill_id: Uuid::now_v7(),
         snapshot_id,
         manifest: blob("2", "application/json"),
+        source: StoredRestoreSource::Local,
         outcome,
         failure_class: (!passed).then(|| "ref_mismatch".to_owned()),
         refs_matched: passed,

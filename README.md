@@ -2,7 +2,7 @@
 
 `ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
-> **Status:** foundation through signed local bundle verification and isolated restore drills is implemented. A healthy bare mirror can produce an all-ref bundle and signed content-addressed manifest; scheduled verification re-hashes stored bytes and proves exact refs in scratch. LFS collection and off-host copies remain later plan items.
+> **Status:** foundation through verified S3-compatible off-host replicas is implemented. A healthy bare mirror can produce an all-ref bundle and signed content-addressed manifest; scheduled verification re-hashes local or replica-downloaded bytes and proves exact refs in scratch. LFS collection, retention, and remote deletion/lifecycle management remain later plan items.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -187,6 +187,9 @@ snapshot_artifacts
 manifests
 verification_runs
 restore_drills
+replica_targets
+replication_attempts
+replica_placements
 retention_actions
 storage_locations
 outbox_events
@@ -202,6 +205,13 @@ Initial backends:
 - local filesystem for active bare mirrors;
 - local content-addressed BlobStore for snapshots;
 - S3-compatible storage for off-host copies.
+
+The implemented S3 adapter uses explicit endpoint/bucket/region configuration and environment-only
+credentials, path-style content-derived keys, bounded multipart PUT, and full GET size/SHA-256
+verification. Required replica convergence is tracked separately from immutable local verification;
+an outage degrades off-host health without blocking local snapshot, verification, or restore work.
+The worker bounds admitted items, aggregate bytes, concurrency, request time, and recoverable leases.
+Vault does not delete remote objects or configure bucket lifecycle rules in this item.
 
 Future adapters may include immutable or WORM storage. Every backend reports integrity, capacity, latency, and reachability separately.
 
@@ -235,7 +245,7 @@ Physical deletion is multi-stage:
 
 Restore is a first-class scheduled operation, not a manual emergency-only script.
 
-A current local-bundle drill:
+A current local- or replica-bundle drill:
 
 - reads the selected snapshot only through its immutable stored BlobRefs;
 - verifies SHA-256, the Ed25519 manifest signature, and the bounded parent digest chain;
@@ -244,6 +254,10 @@ A current local-bundle drill:
 - verify expected refs;
 - run `git fsck` on the restored repository;
 - records complete terminal evidence before removing the owned scratch directory.
+
+Replica-preferred and replica-required drills select only complete, fresh placement sets. Remote
+manifest and bundle bytes are downloaded into create-new UUID-owned scratch files and re-hashed
+before any network-disabled Git stage; the terminal report records the actual source target.
 
 It never checks out or executes repository code, accepts no network URL, and denies live-mirror
 paths before spawning Git. LFS restore is not claimed until the separate LFS plan item exists.
@@ -339,6 +353,6 @@ service is unavailable.
 
 ## Project status
 
-Implemented so far: the service foundation (1), desired-state reconciliation (2), the confined Git runner (3), local mirror lifecycle (4), immutable full-bundle snapshots and manifests (5), and signed stored-byte verification with isolated restore drills (6). Verification scheduling is deterministic and budget-aware; terminal reports are append-only and alert-worthy failure facts enter the transactional outbox. The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
+Implemented so far: the service foundation (1), desired-state reconciliation (2), the confined Git runner (3), local mirror lifecycle (4), immutable full-bundle snapshots and manifests (5), signed stored-byte verification with isolated restore drills (6), and bounded verified S3-compatible off-host replicas with replica-origin drills (7). Verification and replication scheduling are deterministic and budget-aware; terminal reports are append-only and alert-worthy failure facts enter the transactional outbox. The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
 
-Not yet implemented: off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10), and the event-bus publisher/consumer that will deliver persisted outbox facts. No code claims those capabilities.
+Not yet implemented: LFS and auxiliary collectors (8), retention and local/remote deletion (9), legacy adoption (10), provider bucket-policy/lifecycle automation, and the event-bus publisher/consumer that will deliver persisted outbox facts. No code claims those capabilities.

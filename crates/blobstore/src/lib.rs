@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ratatoskr_vault_core::snapshot::BlobRef;
 use sha2::{Digest, Sha256};
 
+/// S3-compatible replica implementation.
+pub mod replica;
+
 const OWNER: &str = "ratatoskr-vault";
 const DIGEST_BYTES: usize = 32;
 const COPY_BUFFER_BYTES: usize = 16 * 1024;

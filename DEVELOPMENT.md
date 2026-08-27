@@ -1,9 +1,9 @@
 # Developing Ratatoskr Vault
 
-> Status: Implemented (foundation through signed bundle verification and isolated restore drills)
+> Status: Implemented (foundation through verified S3-compatible off-host replicas)
 > Last reviewed: 2026-08-27
 
-The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots, signed manifests, scheduled stored-byte verification, and isolated restore drills are implemented. Retention, off-host storage, and event publication remain later plan items.
+The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots, signed manifests, scheduled stored-byte verification, isolated restore drills, and verified S3-compatible replicas are implemented. Retention, remote deletion/lifecycle management, and event publication remain later plan items.
 
 ## Toolchain
 
@@ -17,7 +17,7 @@ A PostgreSQL server is needed by every persistence test and by the boot test:
 docker compose up -d
 ```
 
-`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. No NATS is required. Snapshot tests use a temporary local filesystem BlobStore and never contact an off-host object store.
+`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. No NATS is required. Snapshot tests use a temporary local filesystem BlobStore. Replica tests use an in-process Axum S3-compatible request-subset harness bound to `127.0.0.1:0`; they use no personal credentials or provider account and are not proof of production TLS/IAM compatibility.
 
 ### Rust — also the CI gate
 
@@ -114,6 +114,35 @@ Terminal verification and drill reports are append-only rows. A failure enqueues
 `vault.snapshot.verification_failed.v1` or `vault.restore.failed.v1` in the same PostgreSQL
 transaction. No event-bus publisher exists in this item: the outbox is durable fleet evidence, not
 a claim that an alert was delivered.
+
+## Off-host replicas (plan item 7)
+
+Each `RATATOSKR__REPLICAS__TARGETS__<NAME>__*` section defines one explicit S3-compatible endpoint,
+bucket, region, content-key prefix, required/enabled state, finite deadlines, object/backlog byte
+ceilings, and concurrency. Access key, secret key, and optional session token are environment-only
+secret values; Vault does not read provider profiles or metadata-service credentials. HTTPS is
+mandatory except for loopback test endpoints.
+
+Vault streams bundles and manifests with multipart upload, then performs a full GET and recomputes
+the immutable size and SHA-256 before recording placement. Attempts and target observations are
+append-only/current inventory in `schema.sql`; credentials and provider response text are never
+persisted. Missing required placements degrade only the off-host component of snapshot health.
+Local verification evidence and local operations continue, and the absent/oldest-first backlog is
+bounded by item, byte, and independent worker-permit ceilings.
+
+Drill policy can select `local`, `replica_preferred`, or `replica_required`. Replica bytes first land
+in create-new drill-owned scratch files, are hashed, and are republished into a drill-local
+content-addressed store before the existing network-disabled Git stages run. The report persists the
+actual source target. `replica_required` never silently substitutes local bytes.
+
+Recommended remote policy: use a dedicated bucket or prefix; permit only prefix-scoped bucket
+listing plus object GET/PUT and multipart create/upload/list/abort operations. Enable provider-side
+versioning, default encryption, and Object Lock/WORM where supported and operationally tested. An
+incomplete-multipart cleanup rule is recommended, but its age must exceed Vault's longest attempt;
+no lifecycle rule may expire completed objects before Vault retention authorizes deletion. Vault
+does not create bucket policy, lifecycle rules, or remote deletions in this plan item. Before a
+deployment claims the single-host-loss gap is closed, run a real-provider smoke test covering TLS,
+credentials, multipart behavior, re-download verification, and one replica-origin restore drill.
 
 ## Local mirror lifecycle (plan item 4)
 

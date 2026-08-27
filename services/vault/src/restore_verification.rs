@@ -1,7 +1,7 @@
 //! Scheduled verification admission and isolated restore-drill execution.
 
 mod durable;
-
+mod replica;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -39,6 +39,76 @@ pub enum VerificationFailure {
     IsolationFailed,
     /// Restored ref names or object ids differ from the manifest.
     RefMismatch,
+    /// The selected replica could not supply verified bytes within its finite bounds.
+    ReplicaUnavailable,
+}
+/// Operator policy for choosing drill bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreSourcePolicy {
+    /// Use only the local immutable store.
+    Local,
+    /// Prefer an eligible verified replica, otherwise use local bytes.
+    ReplicaPreferred,
+    /// Require eligible replica bytes and never fall back locally.
+    ReplicaRequired,
+}
+/// One complete placement set considered for a replica-backed drill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicaRestoreCandidate {
+    /// Stable replica identity.
+    pub replica_target_id: Uuid,
+    /// Every manifest-required artifact currently has verified placement evidence.
+    pub complete: bool,
+    /// Oldest successful verification across the placement set, as Unix seconds.
+    pub verified_at: u64,
+}
+/// Actual source selected for a drill and persisted in its report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreSource {
+    /// Vault's local immutable `BlobStore`.
+    Local,
+    /// One named replica target.
+    Replica {
+        /// Stable credential-free target identity.
+        replica_target_id: Uuid,
+    },
+}
+
+/// No source satisfies the requested drill policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("requested restore source is unavailable")]
+pub struct RestoreSourceUnavailable;
+
+/// Selects a source deterministically from complete placement evidence and a freshness cutoff.
+///
+/// # Errors
+/// Returns [`RestoreSourceUnavailable`] when no eligible source satisfies `policy`.
+pub fn select_restore_source(
+    policy: RestoreSourcePolicy,
+    local_available: bool,
+    freshness_cutoff: u64,
+    replicas: &[ReplicaRestoreCandidate],
+) -> Result<RestoreSource, RestoreSourceUnavailable> {
+    let replica = replicas
+        .iter()
+        .filter(|candidate| candidate.complete && candidate.verified_at >= freshness_cutoff)
+        .min_by_key(|candidate| {
+            (
+                std::cmp::Reverse(candidate.verified_at),
+                candidate.replica_target_id,
+            )
+        })
+        .map(|candidate| RestoreSource::Replica {
+            replica_target_id: candidate.replica_target_id,
+        });
+    match policy {
+        RestoreSourcePolicy::Local if local_available => Ok(RestoreSource::Local),
+        RestoreSourcePolicy::Local => Err(RestoreSourceUnavailable),
+        RestoreSourcePolicy::ReplicaPreferred => replica
+            .or_else(|| local_available.then_some(RestoreSource::Local))
+            .ok_or(RestoreSourceUnavailable),
+        RestoreSourcePolicy::ReplicaRequired => replica.ok_or(RestoreSourceUnavailable),
+    }
 }
 
 /// One bounded stage observation inside a terminal report.
@@ -115,6 +185,8 @@ pub struct RestoreDrillReport {
     pub snapshot_id: Uuid,
     /// Exact manifest used for ref authority.
     pub manifest: BlobRef,
+    /// Actual byte source used by the drill.
+    pub source: RestoreSource,
     /// Start wall-clock observation.
     pub started_at: SystemTime,
     /// Completion wall-clock observation.
@@ -197,50 +269,31 @@ impl RestoreDrill {
             .scratch_root
             .join("runs")
             .join(drill_id.to_string());
-        let result = self.execute(&run_root, verification).await;
+        let result = self
+            .execute(&run_root.join("repository"), verification, &self.store)
+            .await;
         let _ignored = std::fs::remove_dir_all(&run_root);
-        let (stages, observed_refs, failure) = match result {
-            Ok((stages, refs)) => (stages, refs, None),
-            Err((stages, failure, refs)) => (stages, refs, Some(failure)),
-        };
-        let observed_ref_set_sha256 = canonical_ref_digest(&observed_refs);
-        RestoreDrillReport {
+        build_drill_report(
             drill_id,
-            snapshot_id: verification.snapshot_id,
-            manifest: verification.manifest.clone(),
+            verification,
+            RestoreSource::Local,
             started_at,
-            finished_at: SystemTime::now(),
-            duration: started.elapsed(),
-            outcome: if failure.is_none() {
-                ReportOutcome::Passed
-            } else {
-                ReportOutcome::Failed
-            },
-            failure,
-            stages,
-            expected_ref_count: verification.expected_ref_count,
-            observed_ref_count: observed_refs.len(),
-            expected_ref_set_sha256: verification.expected_ref_set_sha256.clone(),
-            observed_ref_set_sha256,
-            network_disabled: true,
-            live_mirror_accessed: false,
-        }
+            started.elapsed(),
+            result,
+        )
     }
 
     async fn execute(
         &self,
         run_root: &std::path::Path,
         verification: &VerificationReport,
-    ) -> Result<
-        (Vec<StageReport>, Vec<RefEvidence>),
-        (Vec<StageReport>, VerificationFailure, Vec<RefEvidence>),
-    > {
+        store: &LocalBlobStore,
+    ) -> DrillResult {
         let mut stages = Vec::new();
         if verification.outcome != ReportOutcome::Passed {
             return Err((stages, VerificationFailure::BundleInvalid, Vec::new()));
         }
-        let evidence = self
-            .load_manifest(&verification.manifest)
+        let evidence = Self::load_manifest(store, &verification.manifest)
             .map_err(|failure| (stages.clone(), failure, Vec::new()))?;
         let bundle = evidence.bundles.first().ok_or_else(|| {
             (
@@ -249,7 +302,7 @@ impl RestoreDrill {
                 Vec::new(),
             )
         })?;
-        self.store.verify(bundle).map_err(|_| {
+        store.verify(bundle).map_err(|_| {
             (
                 stages.clone(),
                 VerificationFailure::HashMismatch,
@@ -263,11 +316,10 @@ impl RestoreDrill {
                 Vec::new(),
             )
         })?;
-        let relative_bundle = self
-            .store
+        let relative_bundle = store
             .resolve(bundle)
             .and_then(|path| {
-                path.strip_prefix(self.store.root())
+                path.strip_prefix(store.root())
                     .map(std::path::Path::to_path_buf)
                     .map_err(|_| BlobStoreError::InvalidInput)
             })
@@ -278,7 +330,7 @@ impl RestoreDrill {
                     Vec::new(),
                 )
             })?;
-        let bundle_path = ConfinedPath::new(self.store.root(), &relative_bundle).map_err(|_| {
+        let bundle_path = ConfinedPath::new(store.root(), &relative_bundle).map_err(|_| {
             (
                 stages.clone(),
                 VerificationFailure::IsolationFailed,
@@ -320,12 +372,14 @@ impl RestoreDrill {
         }
     }
 
-    fn load_manifest(&self, reference: &BlobRef) -> Result<SnapshotManifest, VerificationFailure> {
-        self.store
+    fn load_manifest(
+        store: &LocalBlobStore,
+        reference: &BlobRef,
+    ) -> Result<SnapshotManifest, VerificationFailure> {
+        store
             .verify(reference)
             .map_err(|_| VerificationFailure::HashMismatch)?;
-        let path = self
-            .store
+        let path = store
             .resolve(reference)
             .map_err(|_| VerificationFailure::ManifestInvalid)?;
         let bytes = std::fs::read(path).map_err(|_| VerificationFailure::ManifestInvalid)?;
@@ -350,6 +404,48 @@ impl RestoreDrill {
             credential_helper: PathBuf::from("/usr/bin/false"),
         })
         .with_denied_roots(vec![self.settings.live_mirror_root.clone()])
+    }
+}
+
+type DrillResult = Result<
+    (Vec<StageReport>, Vec<RefEvidence>),
+    (Vec<StageReport>, VerificationFailure, Vec<RefEvidence>),
+>;
+
+fn build_drill_report(
+    drill_id: Uuid,
+    verification: &VerificationReport,
+    source: RestoreSource,
+    started_at: SystemTime,
+    duration: Duration,
+    result: DrillResult,
+) -> RestoreDrillReport {
+    let (stages, observed_refs, failure) = match result {
+        Ok((stages, refs)) => (stages, refs, None),
+        Err((stages, failure, refs)) => (stages, refs, Some(failure)),
+    };
+    let observed_ref_set_sha256 = canonical_ref_digest(&observed_refs);
+    RestoreDrillReport {
+        drill_id,
+        snapshot_id: verification.snapshot_id,
+        manifest: verification.manifest.clone(),
+        source,
+        started_at,
+        finished_at: SystemTime::now(),
+        duration,
+        outcome: if failure.is_none() {
+            ReportOutcome::Passed
+        } else {
+            ReportOutcome::Failed
+        },
+        failure,
+        stages,
+        expected_ref_count: verification.expected_ref_count,
+        observed_ref_count: observed_refs.len(),
+        expected_ref_set_sha256: verification.expected_ref_set_sha256.clone(),
+        observed_ref_set_sha256,
+        network_disabled: true,
+        live_mirror_accessed: false,
     }
 }
 

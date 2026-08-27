@@ -17,14 +17,19 @@ ratatoskr-vault-blobstore.workspace = true
 ratatoskr-vault-gitrunner.workspace = true
 ratatoskr-vault-http.workspace     = true
 ratatoskr-vault-persistence.workspace = true
+ratatoskr-vault-telemetry.workspace = true
 tokio.workspace                    = true
 tracing.workspace                  = true
 uuid.workspace                     = true
 serde_json.workspace               = true
+thiserror.workspace                = true
 
 [dev-dependencies]
+axum.workspace = true
 ratatoskr-vault-persistence = { workspace = true, features = ["test-support"] }
+secrecy.workspace = true
 sqlx.workspace              = true
+url.workspace = true
 
 [lints]
 workspace = true

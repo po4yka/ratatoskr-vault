@@ -24,6 +24,31 @@ impl EvidenceOutcome {
     }
 }
 
+/// Actual immutable byte source used by one restore drill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredRestoreSource {
+    /// Vault's local immutable `BlobStore`.
+    Local,
+    /// One credential-free replica target identity.
+    Replica(Uuid),
+}
+
+impl StoredRestoreSource {
+    const fn kind(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Replica(_) => "replica",
+        }
+    }
+
+    const fn replica_target_id(self) -> Option<Uuid> {
+        match self {
+            Self::Local => None,
+            Self::Replica(target_id) => Some(target_id),
+        }
+    }
+}
+
 /// Complete terminal restore-drill evidence ready for one short transaction.
 #[derive(Debug, Clone)]
 pub struct StoredRestoreDrillReport {
@@ -33,6 +58,8 @@ pub struct StoredRestoreDrillReport {
     pub snapshot_id: Uuid,
     /// Exact manifest used as authority.
     pub manifest: BlobRef,
+    /// Actual source whose bytes were acquired and verified.
+    pub source: StoredRestoreSource,
     /// Terminal outcome.
     pub outcome: EvidenceOutcome,
     /// Stable typed failure class when failed.
@@ -248,16 +275,19 @@ impl Database {
 
         sqlx::query(
             "insert into git_vault.restore_drills
-                 (drill_id, snapshot_id, manifest_hash, outcome, failure_class, refs_matched,
+                 (drill_id, snapshot_id, manifest_hash, source_kind, replica_target_id,
+                  outcome, failure_class, refs_matched,
                   lfs_restored, duration_millis, stages, expected_ref_count, observed_ref_count,
                   expected_refs_hash, observed_refs_hash, network_disabled,
                   live_mirror_accessed, started_at, finished_at)
-             values ($1, $2, $3, $4, $5, $6, null, $7, $8, $9, $10, $11, $12, $13, $14,
-                     now() - ($7 * interval '1 millisecond'), now())",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, null, $9, $10, $11, $12, $13, $14,
+                     $15, $16, now() - ($9 * interval '1 millisecond'), now())",
         )
         .bind(report.drill_id)
         .bind(report.snapshot_id)
         .bind(manifest_hash)
+        .bind(report.source.kind())
+        .bind(report.source.replica_target_id())
         .bind(report.outcome.as_str())
         .bind(&report.failure_class)
         .bind(report.refs_matched)

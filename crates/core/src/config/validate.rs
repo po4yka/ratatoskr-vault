@@ -73,8 +73,117 @@ pub(crate) fn validate(config: &VaultConfig) -> Vec<Violation> {
     found.extend(otlp_violations(config));
     found.extend(mirror_violations(config));
     found.extend(verification_violations(config));
+    found.extend(replica_violations(config));
 
     found
+}
+
+/// V7 — off-host work is permitted only with explicit credentials, transport confinement, and
+/// finite admission/deadline budgets. Values never enter a violation, so secrets remain redacted.
+fn replica_violations(config: &VaultConfig) -> Vec<Violation> {
+    let mut found = Vec::new();
+    let Some(replicas) = config.replicas.as_ref() else {
+        return found;
+    };
+
+    for target in replicas.targets.values().filter(|target| target.enabled) {
+        let loopback_http = target.endpoint.scheme() == "http"
+            && target.endpoint.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+        let endpoint_is_origin = target.endpoint.username().is_empty()
+            && target.endpoint.password().is_none()
+            && target.endpoint.query().is_none()
+            && target.endpoint.fragment().is_none()
+            && target.endpoint.path() == "/";
+        if (target.endpoint.scheme() != "https" && !loopback_http) || !endpoint_is_origin {
+            found.push(Violation {
+                key: "replicas.targets.<target>.endpoint",
+                env_var: "RATATOSKR__REPLICAS__TARGETS__<TARGET>__ENDPOINT",
+                rule: "must be a credential-free https:// origin, except loopback http:// origins used by local tests",
+            });
+        }
+        if target.access_key.expose_secret().is_empty() {
+            found.push(Violation {
+                key: "replicas.targets.<target>.access_key",
+                env_var: "RATATOSKR__REPLICAS__TARGETS__<TARGET>__ACCESS_KEY",
+                rule: "must be supplied through the process environment",
+            });
+        }
+        if target.secret_access_key.expose_secret().is_empty() {
+            found.push(Violation {
+                key: "replicas.targets.<target>.secret_access_key",
+                env_var: "RATATOSKR__REPLICAS__TARGETS__<TARGET>__SECRET_ACCESS_KEY",
+                rule: "must be supplied through the process environment",
+            });
+        }
+        replica_positive(
+            &mut found,
+            target.connect_timeout_seconds,
+            "replicas.targets.<target>.connect_timeout_seconds",
+            "RATATOSKR__REPLICAS__TARGETS__<TARGET>__CONNECT_TIMEOUT_SECONDS",
+            "must be a positive finite connection timeout",
+        );
+        replica_positive(
+            &mut found,
+            target.request_timeout_seconds,
+            "replicas.targets.<target>.request_timeout_seconds",
+            "RATATOSKR__REPLICAS__TARGETS__<TARGET>__REQUEST_TIMEOUT_SECONDS",
+            "must be a positive finite end-to-end deadline",
+        );
+        replica_positive(
+            &mut found,
+            target.attempt_timeout_seconds,
+            "replicas.targets.<target>.attempt_timeout_seconds",
+            "RATATOSKR__REPLICAS__TARGETS__<TARGET>__ATTEMPT_TIMEOUT_SECONDS",
+            "must be a positive finite attempt timeout",
+        );
+        replica_positive(
+            &mut found,
+            target.max_object_bytes,
+            "replicas.targets.<target>.max_object_bytes",
+            "RATATOSKR__REPLICAS__TARGETS__<TARGET>__MAX_OBJECT_BYTES",
+            "must be a positive finite object-size ceiling",
+        );
+        replica_positive(
+            &mut found,
+            u64::from(target.max_backlog_items),
+            "replicas.targets.<target>.max_backlog_items",
+            "RATATOSKR__REPLICAS__TARGETS__<TARGET>__MAX_BACKLOG_ITEMS",
+            "must be a positive finite item ceiling",
+        );
+        replica_positive(
+            &mut found,
+            target.max_backlog_bytes,
+            "replicas.targets.<target>.max_backlog_bytes",
+            "RATATOSKR__REPLICAS__TARGETS__<TARGET>__MAX_BACKLOG_BYTES",
+            "must be a positive finite byte ceiling",
+        );
+        if !(1..=4).contains(&target.max_concurrent) {
+            found.push(Violation {
+                key: "replicas.targets.<target>.max_concurrent",
+                env_var: "RATATOSKR__REPLICAS__TARGETS__<TARGET>__MAX_CONCURRENT",
+                rule: "must be 1..=4 for the deployment target's four CPU cores",
+            });
+        }
+    }
+
+    found
+}
+
+fn replica_positive(
+    found: &mut Vec<Violation>,
+    value: u64,
+    key: &'static str,
+    env_var: &'static str,
+    rule: &'static str,
+) {
+    if value == 0 {
+        found.push(Violation { key, env_var, rule });
+    }
 }
 
 /// V6 — verification never runs without finite admission, confinement, and explicit trust roots.

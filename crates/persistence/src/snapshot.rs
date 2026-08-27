@@ -127,6 +127,15 @@ impl Database {
             bundle_size,
         )
         .await?;
+        insert_artifact(
+            &mut *transaction,
+            snapshot_id,
+            "manifest",
+            manifest,
+            manifest_hash.clone(),
+            manifest_size,
+        )
+        .await?;
         sqlx::query(
             "insert into git_vault.manifests
                  (manifest_id, snapshot_id, schema_version, manifest_hash, blob_owner,

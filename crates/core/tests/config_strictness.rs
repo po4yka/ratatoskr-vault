@@ -328,3 +328,51 @@ fn verification_policy_rejects_zero_budgets_overlapping_roots_and_bad_keys() {
         "the secret signing seed leaked into diagnostics: {rendered}"
     );
 }
+
+#[test]
+fn replica_policy_rejects_missing_secrets_zero_budgets_and_plaintext_remote() {
+    let secret_canary = "replica-secret-must-never-render";
+    let error = config::load_from(config::figment().merge(Serialized::default(
+        "replicas",
+        serde_json::json!({
+            "targets": {
+                "offsite": {
+                    "endpoint": "http://storage.example.invalid",
+                    "bucket": "vault-fixtures",
+                    "region": "fixture-1",
+                    "secret_access_key": secret_canary,
+                    "connect_timeout_seconds": 0,
+                    "request_timeout_seconds": 0,
+                    "attempt_timeout_seconds": 0,
+                    "max_object_bytes": 0,
+                    "max_backlog_items": 0,
+                    "max_backlog_bytes": 0,
+                    "max_concurrent": 0
+                }
+            }
+        }),
+    )))
+    .expect_err("missing access key, plaintext remote endpoint, and zero limits must be rejected");
+
+    let rendered = format!("{} {error:?}", error.report());
+    for key in [
+        "replicas.targets.<target>.endpoint",
+        "replicas.targets.<target>.access_key",
+        "replicas.targets.<target>.connect_timeout_seconds",
+        "replicas.targets.<target>.request_timeout_seconds",
+        "replicas.targets.<target>.attempt_timeout_seconds",
+        "replicas.targets.<target>.max_object_bytes",
+        "replicas.targets.<target>.max_backlog_items",
+        "replicas.targets.<target>.max_backlog_bytes",
+        "replicas.targets.<target>.max_concurrent",
+    ] {
+        assert!(
+            rendered.contains(key),
+            "the report must name {key}\n{rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains(secret_canary),
+        "replica credentials leaked into diagnostics: {rendered}"
+    );
+}

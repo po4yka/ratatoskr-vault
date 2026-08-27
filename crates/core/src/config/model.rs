@@ -43,6 +43,10 @@ pub struct VaultConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationConfig>,
 
+    /// Environment-only S3-compatible off-host replica targets and finite worker budgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<ReplicasConfig>,
+
     /// Logging, filtering and span export.
     pub telemetry: TelemetryConfig,
 }
@@ -64,6 +68,7 @@ impl VaultConfig {
             },
             mirror: None,
             verification: None,
+            replicas: None,
             telemetry: TelemetryConfig {
                 log_format: LogFormat::default(),
                 log_filter: default_log_filter(),
@@ -71,6 +76,63 @@ impl VaultConfig {
             },
         }
     }
+}
+
+/// Named off-host targets. Map keys are stable operator-assigned target identities.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplicasConfig {
+    /// `RATATOSKR__REPLICAS__TARGETS__<TARGET>__...`.
+    pub targets: BTreeMap<String, ReplicaTargetConfig>,
+}
+
+/// One S3-compatible off-host target. Credentials are accepted only from the process environment
+/// and are structurally excluded from serialization.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplicaTargetConfig {
+    /// HTTPS endpoint, except that loopback HTTP is allowed for deterministic tests.
+    pub endpoint: Url,
+    /// Remote bucket name.
+    pub bucket: String,
+    /// Signing region used by the S3-compatible endpoint.
+    pub region: String,
+    /// Optional fixed key prefix. Repository-controlled names never become object keys.
+    #[serde(default)]
+    pub key_prefix: String,
+    /// Disabled targets remain known but receive no work.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Required targets contribute to snapshot health.
+    #[serde(default = "default_true")]
+    pub required: bool,
+    /// SECRET: S3 access key supplied only through the environment.
+    #[serde(default, skip_serializing)]
+    pub access_key: SecretString,
+    /// SECRET: S3 secret access key supplied only through the environment.
+    #[serde(default, skip_serializing)]
+    pub secret_access_key: SecretString,
+    /// SECRET: optional temporary session token supplied only through the environment.
+    #[serde(default, skip_serializing)]
+    pub session_token: Option<SecretString>,
+    /// TCP/TLS connection timeout.
+    pub connect_timeout_seconds: u64,
+    /// Absolute end-to-end request deadline.
+    pub request_timeout_seconds: u64,
+    /// Per-attempt timeout inside the request deadline.
+    pub attempt_timeout_seconds: u64,
+    /// Maximum admitted object size.
+    pub max_object_bytes: u64,
+    /// Maximum units admitted by one planner pass.
+    pub max_backlog_items: u32,
+    /// Maximum aggregate bytes admitted by one planner pass.
+    pub max_backlog_bytes: u64,
+    /// Maximum concurrent transfers for this target.
+    pub max_concurrent: u8,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// The default operator-listener port.

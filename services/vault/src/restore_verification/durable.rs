@@ -5,7 +5,8 @@ use std::time::Duration;
 use ratatoskr_vault_core::error::VaultError;
 use ratatoskr_vault_core::snapshot::BlobRef;
 use ratatoskr_vault_persistence::{
-    Database, EvidenceOutcome, StoredRestoreDrillReport, StoredVerificationReport,
+    Database, EvidenceOutcome, StoredRestoreDrillReport, StoredRestoreSource,
+    StoredVerificationReport,
 };
 use uuid::Uuid;
 
@@ -145,6 +146,12 @@ fn stored_drill(report: &RestoreDrillReport) -> StoredRestoreDrillReport {
         drill_id: report.drill_id,
         snapshot_id: report.snapshot_id,
         manifest: report.manifest.clone(),
+        source: match report.source {
+            super::RestoreSource::Local => StoredRestoreSource::Local,
+            super::RestoreSource::Replica { replica_target_id } => {
+                StoredRestoreSource::Replica(replica_target_id)
+            }
+        },
         outcome: evidence_outcome(report.outcome),
         failure_class: report.failure.map(failure_code).map(str::to_owned),
         refs_matched: report.expected_ref_count == report.observed_ref_count
@@ -174,6 +181,7 @@ const fn failure_code(failure: VerificationFailure) -> &'static str {
         VerificationFailure::BundleInvalid => "bundle_invalid",
         VerificationFailure::IsolationFailed => "isolation_failed",
         VerificationFailure::RefMismatch => "ref_mismatch",
+        VerificationFailure::ReplicaUnavailable => "replica_unavailable",
     }
 }
 

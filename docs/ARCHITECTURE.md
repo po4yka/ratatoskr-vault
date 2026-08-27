@@ -2,8 +2,9 @@
 
 > Status: target architecture. The Rust service foundation, operator health plane, current
 > `git_vault` schema, CI gate, reconciliation, confined Git execution, and local mirror lifecycle
-> are implemented. Local immutable bundle snapshots, signed manifests, verification, and restore
-> drills are implemented; retention, off-host storage, and the remaining sections are planned.
+> are implemented. Local immutable bundle snapshots, signed manifests, verification, restore
+> drills, and verified S3-compatible off-host replicas are implemented; retention, remote deletion,
+> and the remaining sections are planned.
 
 ## 1. Purpose
 
@@ -95,6 +96,9 @@ git_vault.snapshot_artifacts
 git_vault.manifests
 git_vault.integrity_checks
 git_vault.restore_drills
+git_vault.replica_targets
+git_vault.replication_attempts
+git_vault.replica_placements
 git_vault.retention_policies
 git_vault.tombstones
 git_vault.storage_locations
@@ -285,7 +289,8 @@ Full bundles are the initial strategy because they simplify restore and reduce d
 
 The implemented local slice builds `git bundle create <artifact> --all`, records the complete ref
 set, signs the current manifest with Ed25519, re-hashes stored bytes, and runs typed local-only
-`git bundle verify` before reconstruction. Off-host publication remains a later placement slice.
+`git bundle verify` before reconstruction. The off-host slice streams each bundle and manifest to
+explicit S3-compatible targets and records placement only after a full GET matches size and SHA-256.
 
 ### 9.2. Snapshot state machine
 
@@ -402,6 +407,14 @@ Vault supports:
 
 Objects are content-addressed and verified after upload. A successful upload response is insufficient; Vault performs size/hash or provider-supported checksum verification.
 
+The implemented adapter deliberately uses the maintained Apache Arrow `object_store` S3 client
+instead of provider-specific SDKs. It constructs the client only from explicit endpoint, bucket,
+region, and environment-supplied credentials; provider profiles and instance metadata are not
+consulted. Its supported request subset is path-style GET plus multipart create/upload/complete and
+abort. Work is absent/oldest-first and bounded by item, aggregate-byte, per-object, concurrency,
+request, and lease ceilings. A remote outage records a closed failure and leaves local paths free to
+continue.
+
 Storage locations record:
 
 - backend and bucket/root;
@@ -412,7 +425,10 @@ Storage locations record:
 - last verification;
 - retention/immutability controls.
 
-Required off-host policy blocks `healthy` status until a verified remote copy exists.
+Required off-host policy blocks aggregate `healthy` status until every manifest-required artifact
+has a verified placement. Local verification remains separate immutable evidence. Optional target
+failure does not degrade aggregate health when all required placements are complete; no required
+target is an explicit misconfiguration for an offsite-required policy.
 
 ## 14. Restore verification
 
@@ -439,6 +455,12 @@ operations expose no source URL, the child permits only the `file` protocol, and
 rejects every argument under configured live-mirror roots before process spawn. The complete
 expected and observed ref summaries, per-stage timings, isolation assertions, and terminal failure
 class are durable append-only evidence.
+
+Source policy is `local`, `replica_preferred`, or `replica_required`. A replica is eligible only
+when the manifest and every required bundle placement are complete and fresh. Acquisition writes
+create-new files in the drill-owned subtree, re-hashes them, and republishes them into a temporary
+local content-addressed store before the existing network-disabled Git stages. Reports persist the
+actual source target, and `replica_required` never falls back locally.
 
 The scheduler reads only successful terminal evidence, orders absent/oldest success first, and
 admits a finite configured sample subject to aggregate scratch bytes and concurrency. Capacity and
