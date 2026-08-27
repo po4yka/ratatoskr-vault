@@ -63,6 +63,14 @@ jobs:
       - name: Show the pinned toolchain
         run: rustup show           # rust-toolchain.toml is the only supported toolchain
 
+      # The LFS acceptance suite uses the real client against local standalone-file fixtures.
+      # Git LFS is a separate program from Git and is not present in the runner image by default.
+      - name: Install the Git LFS test prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes git-lfs
+          git-lfs version
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - run: cargo fetch --locked

@@ -7,7 +7,7 @@ The service foundation exists: a Rust workspace with typed configuration, teleme
 
 ## Toolchain
 
-Rust/Tokio on the toolchain `rust-toolchain.toml` pins (1.97.0, with rustfmt and clippy). rustup installs it on first use; nothing else is required to build.
+Rust/Tokio on the toolchain `rust-toolchain.toml` pins (1.97.0, with rustfmt and clippy). rustup installs it on first use. The real LFS acceptance fixture additionally requires the separate `git-lfs` program; CI installs the distribution package explicitly, while macOS developers can use Homebrew's `git-lfs` package.
 
 ## Local dependencies
 

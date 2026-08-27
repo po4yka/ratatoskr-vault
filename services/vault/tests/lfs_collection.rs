@@ -30,11 +30,15 @@ fn git_binary() -> PathBuf {
 }
 
 fn lfs_binary() -> PathBuf {
-    ["/opt/homebrew/bin/git-lfs", "/usr/local/bin/git-lfs"]
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
-        .expect("Git LFS is a gate prerequisite")
+    [
+        "/opt/homebrew/bin/git-lfs",
+        "/usr/local/bin/git-lfs",
+        "/usr/bin/git-lfs",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| path.exists())
+    .expect("Git LFS is a gate prerequisite")
 }
 
 fn git(cwd: &Path, args: &[&str]) {
