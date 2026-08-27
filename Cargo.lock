@@ -1493,14 +1493,24 @@ dependencies = [
 name = "ratatoskr-vault"
 version = "0.1.0"
 dependencies = [
+ "ratatoskr-vault-blobstore",
  "ratatoskr-vault-core",
  "ratatoskr-vault-gitrunner",
  "ratatoskr-vault-http",
  "ratatoskr-vault-persistence",
+ "serde_json",
  "sqlx",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ratatoskr-vault-blobstore"
+version = "0.1.0"
+dependencies = [
+ "ratatoskr-vault-core",
+ "sha2",
 ]
 
 [[package]]
@@ -1512,6 +1522,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tracing-subscriber",
  "url",

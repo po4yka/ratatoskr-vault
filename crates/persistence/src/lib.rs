@@ -14,6 +14,7 @@
 pub mod test_support;
 
 mod mirror_lifecycle;
+mod snapshot;
 
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use uuid::Uuid;
 
 pub use crate::mirror_lifecycle::QuotaReservationOutcome;
+pub use crate::snapshot::{SnapshotParent, SnapshotSource};
 
 /// The schema, embedded at compile time.
 ///

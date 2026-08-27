@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/blobstore",
     "crates/core",
     "crates/gitrunner",
     "crates/telemetry",
@@ -19,6 +20,7 @@ repository   = "https://github.com/po4yka/ratatoskr-vault"
 [workspace.dependencies]
 # ---- in-repo ----
 ratatoskr-vault-core        = { version = "0.1.0", path = "crates/core" }
+ratatoskr-vault-blobstore   = { version = "0.1.0", path = "crates/blobstore" }
 ratatoskr-vault-gitrunner   = { version = "0.1.0", path = "crates/gitrunner" }
 ratatoskr-vault-telemetry   = { version = "0.1.0", path = "crates/telemetry" }
 ratatoskr-vault-persistence = { version = "0.1.0", path = "crates/persistence" }
@@ -69,6 +71,7 @@ uuid = { version = "1.11", features = ["v7", "serde"] }
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror  = "2.0"
+sha2       = "0.10"
 
 # ---- dev only ----
 tower = { version = "0.5", default-features = false, features = ["util"] }

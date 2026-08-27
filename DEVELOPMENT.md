@@ -1,9 +1,9 @@
 # Developing Ratatoskr Vault
 
-> Status: Implemented (foundation, reconciliation, confined Git runner, local mirror lifecycle)
+> Status: Implemented (foundation, reconciliation, confined Git runner, local mirror lifecycle, local bundle snapshots)
 > Last reviewed: 2026-08-25
 
-The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Snapshots, retention, off-host storage, and eventing are later implementation plan items and do not exist yet.
+The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots and manifests are implemented; retention, off-host storage, and eventing remain later plan items.
 
 ## Toolchain
 
@@ -17,7 +17,7 @@ A PostgreSQL server is needed by every persistence test and by the boot test:
 docker compose up -d
 ```
 
-`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. No NATS, no object store yet: nothing consumes them.
+`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. No NATS is required. Snapshot tests use a temporary local filesystem BlobStore and never contact an off-host object store.
 
 ### Rust — also the CI gate
 
@@ -93,7 +93,7 @@ git -c credential.helper=<path-to-git-credential-helper> <secret-file-path> fetc
 
 The helper binary (`ratatoskr-vault-gitrunner` ships it as `git-credential-helper`) reads an owner-only secret file inside an owner-only run directory and answers the credential protocol on stdout. Secrets never appear in argv or environment blocks; captured output is scanned against active secret material before leaving the runner; the secret file is deleted when the operation ends. The trade-off — a brief `0600` file instead of fd passing — is recorded in the change design because fd inheritance beyond stdio is not expressible under the `unsafe` ban.
 
-LFS collection, BlobStore placement, bundle verbs, and restore drills are later plan items and have no commands here yet; until then the architecture intent lives in `docs/ARCHITECTURE.md` sections 7–14.
+LFS collection, production bundle verification, and restore drills are later plan items. Local bundle creation uses the typed `git bundle create <confined-output> --all` operation and streams completed staging artifacts into Vault-owned content-addressed BlobStore storage.
 
 ## Local mirror lifecycle (plan item 4)
 

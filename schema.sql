@@ -364,6 +364,8 @@ create table git_vault.snapshots (
     snapshot_id     uuid        primary key,
     target_id       uuid        not null references git_vault.targets (target_id),
     mirror_id       uuid        not null references git_vault.mirrors (mirror_id),
+    mirror_lifecycle_run_id uuid not null references git_vault.mirror_lifecycle_runs (run_id),
+    parent_snapshot_id uuid references git_vault.snapshots (snapshot_id),
     format          text        not null,
     status          text        not null,
     refs_hash       bytea       not null check (length(refs_hash) = 32),
@@ -403,6 +405,9 @@ create table git_vault.snapshot_artifacts (
     snapshot_id     uuid        not null references git_vault.snapshots (snapshot_id),
     kind            text        not null,
     sha256_hash     bytea       not null check (length(sha256_hash) = 32),
+    blob_owner      text        not null check (blob_owner = 'ratatoskr-vault'),
+    digest_algorithm text       not null check (digest_algorithm = 'sha256'),
+    media_type      text        not null check (length(media_type) between 1 and 255),
     size_bytes      bigint      not null check (size_bytes > 0),
     created_at      timestamptz not null,
 
@@ -424,6 +429,10 @@ create table git_vault.manifests (
     snapshot_id     uuid        not null unique references git_vault.snapshots (snapshot_id),
     schema_version  integer     not null default 1,
     manifest_hash   bytea       not null check (length(manifest_hash) = 32),
+    blob_owner      text        not null check (blob_owner = 'ratatoskr-vault'),
+    digest_algorithm text       not null check (digest_algorithm = 'sha256'),
+    media_type      text        not null check (media_type = 'application/json'),
+    size_bytes      bigint      not null check (size_bytes > 0),
     created_at      timestamptz not null,
 
     constraint manifests_schema_version_is_positive

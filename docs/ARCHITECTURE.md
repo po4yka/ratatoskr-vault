@@ -2,8 +2,8 @@
 
 > Status: target architecture. The Rust service foundation, operator health plane, current
 > `git_vault` schema, CI gate, reconciliation, confined Git execution, and local mirror lifecycle
-> are implemented. Snapshots, restore, retention, off-host storage, and the remaining sections
-> are planned.
+> are implemented. Local immutable bundle snapshots and manifests are implemented; restore,
+> retention, off-host storage, and the remaining sections are planned.
 
 ## 1. Purpose
 
@@ -283,26 +283,31 @@ git bundle verify <artifact>
 
 Full bundles are the initial strategy because they simplify restore and reduce dependency-chain risk. Incremental bundles may be introduced only with explicit chain manifests and restore tests.
 
+The implemented local slice builds `git bundle create <artifact> --all`, records the complete
+`show-ref` evidence, and persists the immutable BlobRefs with status `built`. It does not run
+`git bundle verify`, publish an off-host replica, or claim a production restore result; those are
+the next verification and placement slices.
+
 ### 9.2. Snapshot state machine
 
 ```text
-planned
--> creating
--> locally_verified
--> uploading
--> remotely_verified
--> restore_pending
+building
+-> built
+-> verifying
 -> verified
+-> offsite_uploading
+-> offsite_verified
+-> restore_testing
+-> restorable
 ```
 
 Failure states retain artifacts for diagnosis when policy allows:
 
 ```text
-creation_failed
-integrity_failed
-upload_failed
-remote_verification_failed
-restore_failed
+failed
+-> quarantined
+-> expired
+-> deleted
 ```
 
 ### 9.3. Snapshot identity

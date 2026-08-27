@@ -21,18 +21,21 @@ pub enum Subcommand {
     CloneMirror,
     /// `git show-ref` — list every ref in the current repository.
     ShowRef,
+    /// `git bundle` — create a portable snapshot bundle.
+    Bundle,
 }
 
 impl Subcommand {
     /// Every subcommand, so the allowlist can never grow silently. The array length is the
     /// documented count; adding a variant without extending it does not compile.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Version,
         Self::Fsck,
         Self::Fetch,
         Self::RevList,
         Self::CloneMirror,
         Self::ShowRef,
+        Self::Bundle,
     ];
 
     /// The literal argument word handed to the Git binary.
@@ -45,6 +48,7 @@ impl Subcommand {
             Self::RevList => "rev-list",
             Self::CloneMirror => "clone",
             Self::ShowRef => "show-ref",
+            Self::Bundle => "bundle",
         }
     }
 }
@@ -166,6 +170,20 @@ impl GitOperation {
         Self {
             subcommand: Subcommand::ShowRef,
             arguments: Vec::new(),
+            credentials: None,
+        }
+    }
+
+    /// `git bundle create <destination> --all` — full portable evidence for every mirror ref.
+    #[must_use]
+    pub fn bundle_create(destination: &crate::ConfinedPath) -> Self {
+        Self {
+            subcommand: Subcommand::Bundle,
+            arguments: vec![
+                std::ffi::OsString::from("create"),
+                destination.as_path().as_os_str().to_os_string(),
+                std::ffi::OsString::from("--all"),
+            ],
             credentials: None,
         }
     }

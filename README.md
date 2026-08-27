@@ -2,7 +2,7 @@
 
 `ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
-> **Status:** foundation, confined Git execution, and the local mirror lifecycle are implemented. The lifecycle clones into target-owned staging, atomically publishes only after integrity checks, and periodically fetches an existing bare mirror. It records finite quota admission, terminal run evidence, checkpoints on interruption, and post-operation object evidence. Snapshots, LFS collection, off-host copies, and restore verification remain later plan items.
+> **Status:** foundation, confined Git execution, local mirror lifecycle, and local immutable bundle/manifest construction are implemented. A healthy bare mirror can produce an all-ref bundle and content-addressed manifest; production verification, restore drills, LFS collection, and off-host copies remain later plan items.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -184,7 +184,7 @@ mirrors
 mirror_attempts
 snapshots
 snapshot_artifacts
-snapshot_manifests
+manifests
 verification_runs
 restore_drills
 retention_actions
@@ -340,4 +340,4 @@ service is unavailable.
 
 Implemented so far: the service foundation (plan item 1: `crates/{core,telemetry,persistence,http}`, `services/vault`, typed configuration, tracing with optional OTLP export, the operator health plane, `schema.sql` applied to a fresh database, graceful SIGTERM shutdown); desired-state reconciliation (plan item 2: delivery validation, deduplicated ingestion, the guarded target state machine, a pure planner, transactional convergence); and the confined Git runner (plan item 3: `crates/gitrunner` with structural command construction, subcommand allowlisting, filesystem confinement, hardened child environments, wall-clock deadlines, output caps, process-group kills, out-of-band credentials via `git-credential-helper`, redacted results, and the deterministic hostile-repository test suite). The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
 
-Not yet implemented: mirror lifecycle (4), snapshots and manifests (5), verification and restore drills (6), off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10). The schema carries their tables as first-version placeholders; no code claims capabilities they do not have.
+Not yet implemented: verification and restore drills (6), off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10). The schema carries their tables as first-version placeholders; no code claims capabilities they do not have.
