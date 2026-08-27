@@ -121,6 +121,9 @@ fn main() -> ExitCode {
                 let _ignored = std::io::stderr().write_all(&payload);
             }
         }
+        "mark" => {
+            std::fs::write("probe-marker", b"spawned").expect("probe marker file must be writable");
+        }
         other => {
             eprintln!("probe: unknown mode {other:?}");
             return ExitCode::FAILURE;

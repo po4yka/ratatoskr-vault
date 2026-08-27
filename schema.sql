@@ -450,39 +450,68 @@ comment on table git_vault.manifests is
 -- ---------------------------------------------------------------------------------------------
 
 create table git_vault.integrity_checks (
-    check_id        uuid        primary key,
-    snapshot_id     uuid        not null references git_vault.snapshots (snapshot_id),
-    subject         text        not null,
-    result          text        not null,
-    checked_at      timestamptz not null,
+    check_id                  uuid        primary key,
+    snapshot_id               uuid        not null references git_vault.snapshots (snapshot_id),
+    manifest_hash             bytea       not null check (length(manifest_hash) = 32),
+    outcome                   text        not null,
+    failure_class             text,
+    duration_millis           bigint      not null check (duration_millis >= 0),
+    stages                    jsonb       not null check (jsonb_typeof(stages) = 'array'),
+    checked_artifacts         jsonb       not null check (jsonb_typeof(checked_artifacts) = 'array'),
+    expected_ref_count        bigint      not null check (expected_ref_count >= 0),
+    expected_refs_hash        bytea       not null check (length(expected_refs_hash) = 32),
+    started_at                timestamptz not null,
+    finished_at               timestamptz not null,
 
-    constraint integrity_checks_subject_is_known
-        check (subject in ('bundle_verify', 'artifact_hash', 'remote_hash', 'restore_refs')),
-    constraint integrity_checks_result_is_known
-        check (result in ('passed', 'failed'))
+    constraint integrity_checks_outcome_is_known
+        check (outcome in ('passed', 'failed')),
+    constraint integrity_checks_terminal_evidence_is_consistent
+        check (
+            (outcome = 'passed' and failure_class is null)
+            or (outcome = 'failed' and failure_class is not null)
+        ),
+    constraint integrity_checks_times_are_ordered
+        check (started_at <= finished_at)
 );
 
 comment on table git_vault.integrity_checks is
     'Every verification attempt, passed or failed. Failed checks are kept: an integrity failure '
     'that disappears from the record looks exactly like an integrity failure that never happened.';
 create index integrity_checks_snapshot_checked_idx
-    on git_vault.integrity_checks (snapshot_id, checked_at desc);
+    on git_vault.integrity_checks (snapshot_id, finished_at desc);
 
 -- ---------------------------------------------------------------------------------------------
 -- restore_drills: proof that an artifact can become a repository again
 -- ---------------------------------------------------------------------------------------------
 
 create table git_vault.restore_drills (
-    drill_id        uuid        primary key,
-    snapshot_id     uuid        not null references git_vault.snapshots (snapshot_id),
-    outcome         text        not null,
-    refs_matched    boolean     not null,
-    lfs_restored    boolean,
-    started_at      timestamptz not null,
-    finished_at     timestamptz not null,
+    drill_id                 uuid        primary key,
+    snapshot_id              uuid        not null references git_vault.snapshots (snapshot_id),
+    manifest_hash            bytea       not null check (length(manifest_hash) = 32),
+    outcome                  text        not null,
+    failure_class            text,
+    refs_matched             boolean     not null,
+    lfs_restored             boolean,
+    duration_millis          bigint      not null check (duration_millis >= 0),
+    stages                   jsonb       not null check (jsonb_typeof(stages) = 'array'),
+    expected_ref_count       bigint      not null check (expected_ref_count >= 0),
+    observed_ref_count       bigint      not null check (observed_ref_count >= 0),
+    expected_refs_hash       bytea       not null check (length(expected_refs_hash) = 32),
+    observed_refs_hash       bytea       not null check (length(observed_refs_hash) = 32),
+    network_disabled         boolean     not null,
+    live_mirror_accessed     boolean     not null,
+    started_at               timestamptz not null,
+    finished_at              timestamptz not null,
 
     constraint restore_drills_outcome_is_known
         check (outcome in ('passed', 'failed')),
+    constraint restore_drills_terminal_evidence_is_consistent
+        check (
+            (outcome = 'passed' and failure_class is null and refs_matched)
+            or (outcome = 'failed' and failure_class is not null)
+        ),
+    constraint restore_drills_isolation_is_proven
+        check (network_disabled and not live_mirror_accessed),
     constraint restore_drills_times_are_ordered
         check (started_at <= finished_at)
 );
@@ -497,6 +526,23 @@ comment on column git_vault.restore_drills.lfs_restored is
     'non-null is a property of the snapshot the drill ran against, which a CHECK constraint cannot '
     'reach across tables (PostgreSQL forbids subqueries in CHECK); the drill writer sets it from '
     'snapshots.includes_lfs, and restore tests assert that rule.';
+
+create function git_vault.reject_terminal_evidence_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+    raise exception 'terminal evidence in %.% is append-only', tg_table_schema, tg_table_name;
+end;
+$$;
+
+create trigger integrity_checks_are_append_only
+    before update or delete on git_vault.integrity_checks
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
+
+create trigger restore_drills_are_append_only
+    before update or delete on git_vault.restore_drills
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
 
 -- ---------------------------------------------------------------------------------------------
 -- retention_policies: the windows deletion is evaluated against

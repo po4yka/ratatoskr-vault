@@ -9,6 +9,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Subcommand {
+    /// `git init` — create an empty bare restore destination.
+    Init,
     /// `git version` — the capability probe used by startup checks and tests.
     Version,
     /// `git fsck` — object-database integrity verification.
@@ -28,7 +30,8 @@ pub enum Subcommand {
 impl Subcommand {
     /// Every subcommand, so the allowlist can never grow silently. The array length is the
     /// documented count; adding a variant without extending it does not compile.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::Init,
         Self::Version,
         Self::Fsck,
         Self::Fetch,
@@ -42,6 +45,7 @@ impl Subcommand {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Init => "init",
             Self::Version => "version",
             Self::Fsck => "fsck",
             Self::Fetch => "fetch",
@@ -183,6 +187,42 @@ impl GitOperation {
                 std::ffi::OsString::from("create"),
                 destination.as_path().as_os_str().to_os_string(),
                 std::ffi::OsString::from("--all"),
+            ],
+            credentials: None,
+        }
+    }
+
+    /// `git init --bare` in the runner's confined working directory.
+    #[must_use]
+    pub fn init_bare() -> Self {
+        Self {
+            subcommand: Subcommand::Init,
+            arguments: vec![std::ffi::OsString::from("--bare")],
+            credentials: None,
+        }
+    }
+
+    /// `git bundle verify <bundle>` against a confined local artifact.
+    #[must_use]
+    pub fn bundle_verify(bundle: &crate::ConfinedPath) -> Self {
+        Self {
+            subcommand: Subcommand::Bundle,
+            arguments: vec![
+                std::ffi::OsString::from("verify"),
+                bundle.as_path().as_os_str().to_os_string(),
+            ],
+            credentials: None,
+        }
+    }
+
+    /// `git fetch <bundle> +refs/*:refs/*` from a confined local artifact only.
+    #[must_use]
+    pub fn fetch_bundle(bundle: &crate::ConfinedPath) -> Self {
+        Self {
+            subcommand: Subcommand::Fetch,
+            arguments: vec![
+                bundle.as_path().as_os_str().to_os_string(),
+                std::ffi::OsString::from("+refs/*:refs/*"),
             ],
             credentials: None,
         }

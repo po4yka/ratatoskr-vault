@@ -69,6 +69,12 @@ impl From<std::io::Error> for BlobStoreError {
 }
 
 impl LocalBlobStore {
+    /// The canonical storage root used to confine immutable artifact operands.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Builds a local store rooted at the supplied Vault-owned directory.
     ///
     /// # Errors
@@ -184,6 +190,42 @@ impl LocalBlobStore {
             return Err(BlobStoreError::InvalidInput);
         }
         Ok(path)
+    }
+
+    /// Re-reads immutable stored bytes and verifies their expected length and SHA-256 digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlobStoreError::DigestMismatch`] when bytes differ from the reference and another
+    /// [`BlobStoreError`] when the reference or stored path is invalid or unreadable.
+    pub fn verify(&self, reference: &BlobRef) -> Result<(), BlobStoreError> {
+        let path = self.resolve(reference)?;
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.len() != reference.size_bytes || metadata.len() > self.max_bytes {
+            return Err(BlobStoreError::DigestMismatch);
+        }
+        let mut reader = BufReader::new(File::open(path)?);
+        let mut digest = Sha256::new();
+        let mut read = 0_u64;
+        let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            read = read
+                .checked_add(u64::try_from(count).map_err(|_| BlobStoreError::SizeLimitExceeded)?)
+                .ok_or(BlobStoreError::SizeLimitExceeded)?;
+            if read > self.max_bytes {
+                return Err(BlobStoreError::SizeLimitExceeded);
+            }
+            digest.update(buffer.get(..count).ok_or(BlobStoreError::DigestMismatch)?);
+        }
+        if read == reference.size_bytes && hex_digest(digest.finalize()) == reference.sha256 {
+            Ok(())
+        } else {
+            Err(BlobStoreError::DigestMismatch)
+        }
     }
 
     fn stream_to_temporary(

@@ -2,8 +2,8 @@
 
 > Status: target architecture. The Rust service foundation, operator health plane, current
 > `git_vault` schema, CI gate, reconciliation, confined Git execution, and local mirror lifecycle
-> are implemented. Local immutable bundle snapshots and manifests are implemented; restore,
-> retention, off-host storage, and the remaining sections are planned.
+> are implemented. Local immutable bundle snapshots, signed manifests, verification, and restore
+> drills are implemented; retention, off-host storage, and the remaining sections are planned.
 
 ## 1. Purpose
 
@@ -283,10 +283,9 @@ git bundle verify <artifact>
 
 Full bundles are the initial strategy because they simplify restore and reduce dependency-chain risk. Incremental bundles may be introduced only with explicit chain manifests and restore tests.
 
-The implemented local slice builds `git bundle create <artifact> --all`, records the complete
-`show-ref` evidence, and persists the immutable BlobRefs with status `built`. It does not run
-`git bundle verify`, publish an off-host replica, or claim a production restore result; those are
-the next verification and placement slices.
+The implemented local slice builds `git bundle create <artifact> --all`, records the complete ref
+set, signs the current manifest with Ed25519, re-hashes stored bytes, and runs typed local-only
+`git bundle verify` before reconstruction. Off-host publication remains a later placement slice.
 
 ### 9.2. Snapshot state machine
 
@@ -435,7 +434,17 @@ flowchart TD
     Select --> Download --> Verify --> Recreate --> LFS --> Fsck --> Compare --> Report
 ```
 
-Restore occurs in an isolated temporary directory, never over the active mirror.
+Restore occurs in a UUID-owned isolated scratch directory, never over the active mirror. Typed Git
+operations expose no source URL, the child permits only the `file` protocol, and runner preparation
+rejects every argument under configured live-mirror roots before process spawn. The complete
+expected and observed ref summaries, per-stage timings, isolation assertions, and terminal failure
+class are durable append-only evidence.
+
+The scheduler reads only successful terminal evidence, orders absent/oldest success first, and
+admits a finite configured sample subject to aggregate scratch bytes and concurrency. Capacity and
+byte deferrals remain visible and due. Failed verification and restore reports atomically enqueue
+versioned Vault outbox facts; this does not imply an event publisher or downstream alert consumer is
+deployed.
 
 ### 14.2. Verification levels
 

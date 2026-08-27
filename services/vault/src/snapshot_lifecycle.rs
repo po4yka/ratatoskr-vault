@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ratatoskr_vault_blobstore::LocalBlobStore;
-use ratatoskr_vault_core::snapshot::{BlobRef, RefEvidence, SnapshotManifest};
+use ratatoskr_vault_core::snapshot::{BlobRef, ManifestSigningKey, RefEvidence, SnapshotManifest};
 use ratatoskr_vault_gitrunner::{ConfinedPath, GitOperation, GitRunner, RunConfig, Subcommand};
 use ratatoskr_vault_persistence::{Database, SnapshotSource};
 use uuid::Uuid;
@@ -19,6 +19,8 @@ pub struct SnapshotSettings {
     pub git_binary: PathBuf,
     /// Maximum bytes in one staged snapshot artifact.
     pub max_bytes: u64,
+    /// Active manifest signer; debug rendering redacts its seed.
+    pub manifest_signer: std::sync::Arc<ManifestSigningKey>,
 }
 
 /// The source mirror observation selected for one snapshot.
@@ -185,7 +187,9 @@ impl SnapshotLifecycle {
             vec![bundle_ref.clone()],
             parent_manifest,
             utc_timestamp()?,
-        );
+            &self.settings.manifest_signer,
+        )
+        .map_err(|error| error.to_string())?;
         let manifest_path = run_root.join("snapshot-manifest.json");
         let payload = serde_json::to_vec(&evidence).map_err(|error| error.to_string())?;
         std::fs::write(&manifest_path, payload).map_err(|error| error.to_string())?;

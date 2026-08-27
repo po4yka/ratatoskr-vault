@@ -17,7 +17,7 @@ mod support;
 use ratatoskr_vault_gitrunner::GitOperation;
 
 /// Every environment key a confined child may observe. Anything else is leakage.
-const CHILD_ENV_ALLOWLIST: [&str; 11] = [
+const CHILD_ENV_ALLOWLIST: [&str; 12] = [
     "PATH",
     "HOME",
     "LANG",
@@ -28,6 +28,7 @@ const CHILD_ENV_ALLOWLIST: [&str; 11] = [
     "GIT_ASKPASS",
     "SSH_ASKPASS",
     "GIT_PAGER",
+    "GIT_ALLOW_PROTOCOL",
     "PAGER",
 ];
 
@@ -63,7 +64,11 @@ async fn inherited_variable_never_reaches_child() {
         observed_keys.push(key);
     }
 
-    for guard in ["GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0"] {
+    for guard in [
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_TERMINAL_PROMPT=0",
+        "GIT_ALLOW_PROTOCOL=file",
+    ] {
         assert!(
             text.contains(guard),
             "hardening guard {guard} missing from child env:\n{text}"

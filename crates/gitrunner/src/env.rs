@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 /// Every environment key a confined child may observe.
-pub const CHILD_ENV_KEYS: [&str; 11] = [
+pub const CHILD_ENV_KEYS: [&str; 12] = [
     "PATH",
     "HOME",
     "LANG",
@@ -22,6 +22,7 @@ pub const CHILD_ENV_KEYS: [&str; 11] = [
     "GIT_ASKPASS",
     "SSH_ASKPASS",
     "GIT_PAGER",
+    "GIT_ALLOW_PROTOCOL",
     "PAGER",
 ];
 
@@ -58,6 +59,7 @@ pub fn child_environment(git_dir: &Path, home: &Path) -> BTreeMap<OsString, OsSt
     env.insert(OsString::from("GIT_ASKPASS"), OsString::from("/dev/null"));
     env.insert(OsString::from("SSH_ASKPASS"), OsString::from("/dev/null"));
     env.insert(OsString::from("GIT_PAGER"), OsString::from("cat"));
+    env.insert(OsString::from("GIT_ALLOW_PROTOCOL"), OsString::from("file"));
     env.insert(OsString::from("PAGER"), OsString::from("cat"));
     env.insert(OsString::from("LANG"), OsString::from("C.UTF-8"));
 

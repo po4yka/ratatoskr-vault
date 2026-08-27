@@ -72,8 +72,103 @@ pub(crate) fn validate(config: &VaultConfig) -> Vec<Violation> {
     found.extend(database_violations(config));
     found.extend(otlp_violations(config));
     found.extend(mirror_violations(config));
+    found.extend(verification_violations(config));
 
     found
+}
+
+/// V6 — verification never runs without finite admission, confinement, and explicit trust roots.
+fn verification_violations(config: &VaultConfig) -> Vec<Violation> {
+    let mut found = Vec::new();
+    let Some(verification) = config.verification.as_ref() else {
+        return found;
+    };
+
+    let scratch_overlaps_live_storage = config.mirror.as_ref().is_none_or(|mirror| {
+        paths_overlap(&verification.scratch_root, &mirror.root)
+            || paths_overlap(&verification.scratch_root, &mirror.work_root)
+    });
+    if !verification.scratch_root.is_absolute() || scratch_overlaps_live_storage {
+        found.push(Violation {
+            key: "verification.scratch_root",
+            env_var: "RATATOSKR__VERIFICATION__SCRATCH_ROOT",
+            rule: "must be an absolute root disjoint from configured mirror and work roots",
+        });
+    }
+    if verification.verification_frequency_seconds == 0 {
+        found.push(Violation {
+            key: "verification.verification_frequency_seconds",
+            env_var: "RATATOSKR__VERIFICATION__VERIFICATION_FREQUENCY_SECONDS",
+            rule: "must be a positive finite interval",
+        });
+    }
+    if verification.drill_frequency_seconds == 0 {
+        found.push(Violation {
+            key: "verification.drill_frequency_seconds",
+            env_var: "RATATOSKR__VERIFICATION__DRILL_FREQUENCY_SECONDS",
+            rule: "must be a positive finite interval",
+        });
+    }
+    if verification.sample_size == 0 {
+        found.push(Violation {
+            key: "verification.sample_size",
+            env_var: "RATATOSKR__VERIFICATION__SAMPLE_SIZE",
+            rule: "must be a positive finite sample",
+        });
+    }
+    if verification.scratch_byte_budget == 0 {
+        found.push(Violation {
+            key: "verification.scratch_byte_budget",
+            env_var: "RATATOSKR__VERIFICATION__SCRATCH_BYTE_BUDGET",
+            rule: "must be a positive finite byte budget",
+        });
+    }
+    if !(1..=4).contains(&verification.max_concurrent) {
+        found.push(Violation {
+            key: "verification.max_concurrent",
+            env_var: "RATATOSKR__VERIFICATION__MAX_CONCURRENT",
+            rule: "must be 1..=4 for the deployment target's four CPU cores",
+        });
+    }
+    if verification.per_drill_timeout_seconds == 0 {
+        found.push(Violation {
+            key: "verification.per_drill_timeout_seconds",
+            env_var: "RATATOSKR__VERIFICATION__PER_DRILL_TIMEOUT_SECONDS",
+            rule: "must be a positive finite process deadline",
+        });
+    }
+    if !is_lower_hex(verification.manifest_signing_seed.expose_secret(), 64) {
+        found.push(Violation {
+            key: "verification.manifest_signing_seed",
+            env_var: "RATATOSKR__VERIFICATION__MANIFEST_SIGNING_SEED",
+            rule: "must be a 32-byte lowercase hexadecimal Ed25519 seed",
+        });
+    }
+    if verification.trusted_manifest_public_keys.is_empty()
+        || verification
+            .trusted_manifest_public_keys
+            .iter()
+            .any(|(key_id, public_key)| !is_lower_hex(key_id, 64) || !is_lower_hex(public_key, 64))
+    {
+        found.push(Violation {
+            key: "verification.trusted_manifest_public_keys",
+            env_var: "RATATOSKR__VERIFICATION__TRUSTED_MANIFEST_PUBLIC_KEYS__<KEY_ID>",
+            rule: "must contain lowercase SHA-256 key ids mapped to 32-byte lowercase hexadecimal Ed25519 public keys",
+        });
+    }
+
+    found
+}
+
+fn paths_overlap(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn is_lower_hex(value: &str, expected_length: usize) -> bool {
+    value.len() == expected_length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// V5 — a configured lifecycle has finite positive storage budgets and exactly the host's four

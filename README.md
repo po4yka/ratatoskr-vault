@@ -2,7 +2,7 @@
 
 `ratatoskr-vault` is the durable backup and restore bounded context for Ratatoskr. It converges desired repository-backup policies into verified Git mirrors, immutable snapshots, content manifests, off-host copies, and repeatable restore drills.
 
-> **Status:** foundation, confined Git execution, local mirror lifecycle, and local immutable bundle/manifest construction are implemented. A healthy bare mirror can produce an all-ref bundle and content-addressed manifest; production verification, restore drills, LFS collection, and off-host copies remain later plan items.
+> **Status:** foundation through signed local bundle verification and isolated restore drills is implemented. A healthy bare mirror can produce an all-ref bundle and signed content-addressed manifest; scheduled verification re-hashes stored bytes and proves exact refs in scratch. LFS collection and off-host copies remain later plan items.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -235,17 +235,18 @@ Physical deletion is multi-stage:
 
 Restore is a first-class scheduled operation, not a manual emergency-only script.
 
-A drill may:
+A current local-bundle drill:
 
-- download the selected snapshot from the target storage location;
-- verify SHA-256 and manifest metadata;
-- run `git bundle verify` or equivalent format checks;
-- clone or unbundle into an isolated temporary directory;
+- reads the selected snapshot only through its immutable stored BlobRefs;
+- verifies SHA-256, the Ed25519 manifest signature, and the bounded parent digest chain;
+- runs typed local-only `git bundle verify` and fetch operations;
+- reconstructs an empty bare repository in a UUID-owned scratch directory;
 - verify expected refs;
 - run `git fsck` on the restored repository;
-- confirm LFS availability where required;
-- optionally build or inspect repository-specific smoke targets;
-- destroy the temporary workspace after recording results.
+- records complete terminal evidence before removing the owned scratch directory.
+
+It never checks out or executes repository code, accepts no network URL, and denies live-mirror
+paths before spawning Git. LFS restore is not claimed until the separate LFS plan item exists.
 
 The system reports restore age and failure state separately from fetch age.
 
@@ -259,9 +260,9 @@ vault.target.reconcile_requested.v1
 vault.mirror.updated.v1
 vault.snapshot.created.v1
 vault.snapshot.verified.v1
-vault.snapshot.failed.v1
+vault.snapshot.verification_failed.v1
 vault.restore_drill.requested.v1
-vault.restore_drill.completed.v1
+vault.restore.failed.v1
 vault.target.degraded.v1
 vault.target.excluded.v1
 ```
@@ -338,6 +339,6 @@ service is unavailable.
 
 ## Project status
 
-Implemented so far: the service foundation (plan item 1: `crates/{core,telemetry,persistence,http}`, `services/vault`, typed configuration, tracing with optional OTLP export, the operator health plane, `schema.sql` applied to a fresh database, graceful SIGTERM shutdown); desired-state reconciliation (plan item 2: delivery validation, deduplicated ingestion, the guarded target state machine, a pure planner, transactional convergence); and the confined Git runner (plan item 3: `crates/gitrunner` with structural command construction, subcommand allowlisting, filesystem confinement, hardened child environments, wall-clock deadlines, output caps, process-group kills, out-of-band credentials via `git-credential-helper`, redacted results, and the deterministic hostile-repository test suite). The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
+Implemented so far: the service foundation (1), desired-state reconciliation (2), the confined Git runner (3), local mirror lifecycle (4), immutable full-bundle snapshots and manifests (5), and signed stored-byte verification with isolated restore drills (6). Verification scheduling is deterministic and budget-aware; terminal reports are append-only and alert-worthy failure facts enter the transactional outbox. The repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
 
-Not yet implemented: verification and restore drills (6), off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10). The schema carries their tables as first-version placeholders; no code claims capabilities they do not have.
+Not yet implemented: off-host replicas (7), LFS and auxiliary collectors (8), retention and deletion (9), legacy adoption (10), and the event-bus publisher/consumer that will deliver persisted outbox facts. No code claims those capabilities.

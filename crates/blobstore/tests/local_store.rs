@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use ratatoskr_vault_blobstore::LocalBlobStore;
+use ratatoskr_vault_blobstore::{BlobStoreError, LocalBlobStore};
 use ratatoskr_vault_core::snapshot::BlobRef;
 
 #[test]
@@ -38,6 +38,30 @@ fn existing_blob_is_immutable_and_identical_retry_is_deterministic() {
             .expect("published bytes must remain readable"),
         b"payload"
     );
+}
+
+#[test]
+fn stored_blob_hash_mismatch_is_detected() {
+    let root = temporary_root();
+    let source = root.join("source.bundle");
+    std::fs::write(&source, b"payload").expect("fixture bytes must be writable");
+    let store =
+        LocalBlobStore::new(root.join("blobs"), 1_024).expect("store root must be initializable");
+    let reference = store
+        .reference_for_file(&source, "application/vnd.git.bundle".to_owned())
+        .expect("fixture reference must be calculable");
+    store
+        .publish_file(&reference, &source)
+        .expect("fixture blob must publish");
+    let stored_path = store
+        .resolve(&reference)
+        .expect("published blob must resolve");
+    std::fs::write(stored_path, b"corrupt").expect("test must be able to inject corruption");
+
+    assert!(matches!(
+        store.verify(&reference),
+        Err(BlobStoreError::DigestMismatch)
+    ));
 }
 
 fn temporary_root() -> PathBuf {

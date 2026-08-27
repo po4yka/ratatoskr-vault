@@ -1,9 +1,9 @@
 # Developing Ratatoskr Vault
 
-> Status: Implemented (foundation, reconciliation, confined Git runner, local mirror lifecycle, local bundle snapshots)
-> Last reviewed: 2026-08-25
+> Status: Implemented (foundation through signed bundle verification and isolated restore drills)
+> Last reviewed: 2026-08-27
 
-The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots and manifests are implemented; retention, off-host storage, and eventing remain later plan items.
+The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes the system Git binary under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots, signed manifests, scheduled stored-byte verification, and isolated restore drills are implemented. Retention, off-host storage, and event publication remain later plan items.
 
 ## Toolchain
 
@@ -93,7 +93,27 @@ git -c credential.helper=<path-to-git-credential-helper> <secret-file-path> fetc
 
 The helper binary (`ratatoskr-vault-gitrunner` ships it as `git-credential-helper`) reads an owner-only secret file inside an owner-only run directory and answers the credential protocol on stdout. Secrets never appear in argv or environment blocks; captured output is scanned against active secret material before leaving the runner; the secret file is deleted when the operation ends. The trade-off — a brief `0600` file instead of fd passing — is recorded in the change design because fd inheritance beyond stdio is not expressible under the `unsafe` ban.
 
-LFS collection, production bundle verification, and restore drills are later plan items. Local bundle creation uses the typed `git bundle create <confined-output> --all` operation and streams completed staging artifacts into Vault-owned content-addressed BlobStore storage.
+LFS collection remains a later plan item. Local bundle creation uses the typed `git bundle create <confined-output> --all` operation and streams completed staging artifacts into Vault-owned content-addressed BlobStore storage. Restore adds only typed `init --bare`, local `bundle verify`, local bundle fetch, `fsck --full`, and `show-ref` operations; it enables only the `file` transport and denies the live-mirror root before process spawn.
+
+## Verification and restore drills (plan item 6)
+
+Every new current-version manifest is Ed25519-signed over deterministic unsigned JSON. Verification
+re-hashes the stored manifest and every bundle, validates the trusted signature and bounded parent
+BlobRef chain, and records all reached stages and timings. A successful verification may run a
+restore drill in `SCRATCH_ROOT/runs/<drill-id>` using only the stored bundle. The drill reconstructs
+an empty bare repository, checks connectivity, and compares the complete restored ref-name/OID set
+to the manifest. Its UUID-owned scratch directory is removed; live mirror directories are denied
+operands and are never cleanup targets.
+
+The `RATATOSKR__VERIFICATION__*` section configures positive verification/drill frequencies, sample
+size, aggregate scratch-byte budget, concurrency and per-drill timeout. Selection is deterministic;
+due work that exceeds capacity or bytes is explicitly deferred, not reported as success or failure.
+Signing seed diagnostics are structurally redacted and trusted public keys are explicit.
+
+Terminal verification and drill reports are append-only rows. A failure enqueues
+`vault.snapshot.verification_failed.v1` or `vault.restore.failed.v1` in the same PostgreSQL
+transaction. No event-bus publisher exists in this item: the outbox is durable fleet evidence, not
+a claim that an alert was delivered.
 
 ## Local mirror lifecycle (plan item 4)
 
@@ -123,7 +143,7 @@ Integration tests create their own disposable databases (`vault_test_<uuid>`) ag
 
 1. Start from versioned desired state; never infer policy from filesystem presence.
 2. Treat every repository, ref, path, hook, filter, submodule, and object as hostile.
-3. Produce immutable artifacts and manifests, verify off-host copies, and execute restore drills (later milestones).
+3. Produce immutable signed artifacts, re-hash stored bytes, and execute isolated restore drills.
 4. Test interruption, retry, cancellation, quota, corruption, and deletion transitions as those features arrive.
 
 Default tests use generated local repositories, never production credentials.

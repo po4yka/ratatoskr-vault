@@ -26,7 +26,7 @@ use figment::providers::{Env, Serialized};
 
 pub use crate::config::model::{
     AdminConfig, DEFAULT_ADMIN_PORT, DatabaseConfig, LogFormat, MirrorLifecycleConfig, OtlpConfig,
-    ShutdownConfig, TelemetryConfig, VaultConfig,
+    ShutdownConfig, TelemetryConfig, VaultConfig, VerificationConfig,
 };
 pub use crate::config::validate::{SHUTDOWN_CEILING_SECONDS, Violation};
 

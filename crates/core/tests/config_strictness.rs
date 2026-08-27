@@ -251,3 +251,80 @@ fn mirror_lifecycle_budget_requires_finite_positive_limits() {
         assert!(report.contains(key), "the report must name {key}\n{report}");
     }
 }
+
+#[test]
+fn verification_policy_rejects_zero_budgets_overlapping_roots_and_bad_keys() {
+    use std::collections::BTreeMap;
+
+    let signing_seed_canary = "not-a-valid-secret-signing-seed";
+    let error = config::load_from(
+        config::figment()
+            .merge(Serialized::default(
+                "mirror.root",
+                "/var/lib/ratatoskr/mirrors",
+            ))
+            .merge(Serialized::default(
+                "mirror.work_root",
+                "/var/lib/ratatoskr/work",
+            ))
+            .merge(Serialized::default("mirror.per_mirror_max_bytes", 1024_u64))
+            .merge(Serialized::default("mirror.global_max_bytes", 4096_u64))
+            .merge(Serialized::default(
+                "mirror.max_concurrent_operations",
+                4_u8,
+            ))
+            .merge(Serialized::default(
+                "verification.scratch_root",
+                "/var/lib/ratatoskr/mirrors/scratch",
+            ))
+            .merge(Serialized::default(
+                "verification.verification_frequency_seconds",
+                0_u64,
+            ))
+            .merge(Serialized::default(
+                "verification.drill_frequency_seconds",
+                0_u64,
+            ))
+            .merge(Serialized::default("verification.sample_size", 0_u32))
+            .merge(Serialized::default(
+                "verification.scratch_byte_budget",
+                0_u64,
+            ))
+            .merge(Serialized::default("verification.max_concurrent", 0_u8))
+            .merge(Serialized::default(
+                "verification.per_drill_timeout_seconds",
+                0_u64,
+            ))
+            .merge(Serialized::default(
+                "verification.manifest_signing_seed",
+                signing_seed_canary,
+            ))
+            .merge(Serialized::default(
+                "verification.trusted_manifest_public_keys",
+                BTreeMap::from([("bad-key", "bad-public-key")]),
+            )),
+    )
+    .expect_err("unsafe verification policy and key material must be rejected");
+
+    let rendered = format!("{} {error:?}", error.report());
+    for key in [
+        "verification.scratch_root",
+        "verification.verification_frequency_seconds",
+        "verification.drill_frequency_seconds",
+        "verification.sample_size",
+        "verification.scratch_byte_budget",
+        "verification.max_concurrent",
+        "verification.per_drill_timeout_seconds",
+        "verification.manifest_signing_seed",
+        "verification.trusted_manifest_public_keys",
+    ] {
+        assert!(
+            rendered.contains(key),
+            "the report must name {key}\n{rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains(signing_seed_canary),
+        "the secret signing seed leaked into diagnostics: {rendered}"
+    );
+}

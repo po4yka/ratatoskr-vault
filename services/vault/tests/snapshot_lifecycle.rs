@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ratatoskr_vault::snapshot_lifecycle::{SnapshotLifecycle, SnapshotRequest, SnapshotSettings};
 use ratatoskr_vault_blobstore::LocalBlobStore;
+use ratatoskr_vault_core::snapshot::ManifestSigningKey;
 use ratatoskr_vault_persistence::test_support::TestDatabase;
 use uuid::Uuid;
 
@@ -27,6 +28,7 @@ async fn healthy_fixture_mirror_produces_complete_immutable_restorable_bundle_ev
             work_root: root.join("work"),
             git_binary: git_binary(),
             max_bytes: 1_000_000,
+            manifest_signer: fixture_signer(),
         },
         store.clone(),
     )
@@ -46,6 +48,12 @@ async fn healthy_fixture_mirror_produces_complete_immutable_restorable_bundle_ev
             .unwrap();
     assert_eq!(manifest["refs"].as_array().unwrap().len(), 2);
     assert_eq!(manifest["bundles"][0]["sha256"], snapshot.bundle.sha256);
+    assert_eq!(
+        snapshot
+            .evidence
+            .verify_signature(&[fixture_signer().verification_key()]),
+        Ok(())
+    );
 
     let restored = root.join("restored");
     let bundle_path = store.resolve(&snapshot.bundle).unwrap();
@@ -85,6 +93,7 @@ async fn publication_failure_preserves_the_last_healthy_mirror_observation() {
             work_root: root.join("work"),
             git_binary: git_binary(),
             max_bytes: 1_000_000,
+            manifest_signer: fixture_signer(),
         },
         LocalBlobStore::new(root.join("blobs"), 1).unwrap(),
     )
@@ -197,6 +206,12 @@ fn create_fixture_mirror(root: &Path) -> PathBuf {
 
 fn git_binary() -> PathBuf {
     PathBuf::from("/usr/bin/git")
+}
+
+fn fixture_signer() -> std::sync::Arc<ManifestSigningKey> {
+    std::sync::Arc::new(
+        ManifestSigningKey::from_seed([17; 32]).expect("fixture signing key must load"),
+    )
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) {

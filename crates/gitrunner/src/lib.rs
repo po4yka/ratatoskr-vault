@@ -78,13 +78,24 @@ pub struct RunConfig {
 #[derive(Debug, Clone)]
 pub struct GitRunner {
     config: RunConfig,
+    denied_roots: Vec<PathBuf>,
 }
 
 impl GitRunner {
     /// Creates a runner from its static configuration.
     #[must_use]
     pub const fn new(config: RunConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            denied_roots: Vec::new(),
+        }
+    }
+
+    /// Adds roots that no operation argument may read or write.
+    #[must_use]
+    pub fn with_denied_roots(mut self, denied_roots: Vec<PathBuf>) -> Self {
+        self.denied_roots = denied_roots;
+        self
     }
 
     /// The exact argument vector this runner would execute for `op`.
@@ -148,6 +159,7 @@ impl GitRunner {
                 requested: op.subcommand().as_str().to_owned(),
             });
         }
+        self.refuse_denied_paths(op)?;
 
         // HOME must exist before the child starts; Git only reads it, but a missing home makes
         // some helpers misbehave. Created best-effort inside confinement, owner-only from the
@@ -278,5 +290,28 @@ impl GitRunner {
                 })
             }
         }
+    }
+
+    fn refuse_denied_paths(&self, op: &GitOperation) -> Result<(), GitRunnerError> {
+        for argument in op.arguments() {
+            let candidate = Path::new(argument);
+            if !candidate.is_absolute() {
+                continue;
+            }
+            let resolved_candidate = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.to_path_buf());
+            for denied_root in &self.denied_roots {
+                let resolved_denied = denied_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| denied_root.clone());
+                if resolved_candidate.starts_with(&resolved_denied) {
+                    return Err(GitRunnerError::PathOutsideConfinement {
+                        reason: "operation path resolves inside a denied root".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }

@@ -4,4 +4,5 @@
 
 pub mod mirror_lifecycle;
 pub mod reconcile;
+pub mod restore_verification;
 pub mod snapshot_lifecycle;

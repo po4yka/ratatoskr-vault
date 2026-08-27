@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use url::Url;
 
 /// Everything a Vault process must know before it can serve.
@@ -39,6 +39,10 @@ pub struct VaultConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<MirrorLifecycleConfig>,
 
+    /// Signed-manifest verification and finite isolated restore-drill policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationConfig>,
+
     /// Logging, filtering and span export.
     pub telemetry: TelemetryConfig,
 }
@@ -59,6 +63,7 @@ impl VaultConfig {
                 grace_seconds: default_grace_seconds(),
             },
             mirror: None,
+            verification: None,
             telemetry: TelemetryConfig {
                 log_format: LogFormat::default(),
                 log_filter: default_log_filter(),
@@ -158,6 +163,90 @@ pub struct MirrorLifecycleConfig {
     /// `RATATOSKR__MIRROR__MAX_CONCURRENT_OPERATIONS`: exactly four on the four-core host.
     #[serde(default = "default_max_concurrent_mirror_operations")]
     pub max_concurrent_operations: u8,
+}
+
+/// Current signed-manifest verification and restore-drill policy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationConfig {
+    /// Absolute Vault-owned root for UUID-derived restore scratch directories.
+    pub scratch_root: PathBuf,
+    /// Seconds between successful stored-artifact verifications.
+    pub verification_frequency_seconds: u64,
+    /// Seconds between successful isolated restore drills.
+    pub drill_frequency_seconds: u64,
+    /// Maximum snapshots admitted by one scheduler pass.
+    pub sample_size: u32,
+    /// Aggregate bundle bytes admitted to scratch by one scheduler pass.
+    pub scratch_byte_budget: u64,
+    /// Maximum concurrent drills on this four-core deployment target.
+    pub max_concurrent: u8,
+    /// Hard wall-clock deadline for every typed Git stage.
+    pub per_drill_timeout_seconds: u64,
+    /// SECRET: lowercase hex Ed25519 seed used only to sign new manifests.
+    #[serde(default, skip_serializing)]
+    pub manifest_signing_seed: SecretString,
+    /// Trusted key-id to lowercase hex Ed25519 public-key mapping.
+    pub trusted_manifest_public_keys: BTreeMap<String, String>,
+}
+
+impl VerificationConfig {
+    /// Decodes the redacted signing seed after configuration validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a manifest-key error when called on an unvalidated configuration.
+    pub fn manifest_signing_key(
+        &self,
+    ) -> Result<crate::snapshot::ManifestSigningKey, crate::snapshot::ManifestError> {
+        let bytes = decode_key_hex(self.manifest_signing_seed.expose_secret())?;
+        crate::snapshot::ManifestSigningKey::from_seed(bytes)
+    }
+
+    /// Decodes the explicit trusted public-key set after configuration validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a manifest-key error when called on an unvalidated configuration.
+    pub fn trusted_manifest_keys(
+        &self,
+    ) -> Result<Vec<crate::snapshot::ManifestVerificationKey>, crate::snapshot::ManifestError> {
+        self.trusted_manifest_public_keys
+            .iter()
+            .map(|(key_id, encoded)| {
+                Ok(crate::snapshot::ManifestVerificationKey {
+                    key_id: key_id.clone(),
+                    public_key: decode_key_hex(encoded)?.to_vec(),
+                })
+            })
+            .collect()
+    }
+}
+
+fn decode_key_hex(encoded: &str) -> Result<[u8; 32], crate::snapshot::ManifestError> {
+    if encoded.len() != 64 {
+        return Err(crate::snapshot::ManifestError::InvalidVerificationKey);
+    }
+    let mut decoded = [0_u8; 32];
+    for (destination, pair) in decoded.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
+        let [high_byte, low_byte] = pair else {
+            return Err(crate::snapshot::ManifestError::InvalidVerificationKey);
+        };
+        let high = key_hex_value(*high_byte)
+            .ok_or(crate::snapshot::ManifestError::InvalidVerificationKey)?;
+        let low = key_hex_value(*low_byte)
+            .ok_or(crate::snapshot::ManifestError::InvalidVerificationKey)?;
+        *destination = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+const fn key_hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 const fn default_max_concurrent_mirror_operations() -> u8 {
