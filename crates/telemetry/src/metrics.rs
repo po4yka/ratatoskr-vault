@@ -30,6 +30,190 @@ pub const VAULT_LFS_OBJECTS_TOTAL: &str = "vault_lfs_objects_total";
 pub const VAULT_LFS_BYTES_TOTAL: &str = "vault_lfs_bytes_total";
 /// End-to-end duration of one bounded collector attempt.
 pub const VAULT_COLLECTOR_DURATION_SECONDS: &str = "vault_collector_duration_seconds";
+/// Retention classifications by bounded mode, decision, and reason.
+pub const VAULT_RETENTION_DECISIONS_TOTAL: &str = "vault_retention_decisions_total";
+/// Retention/deletion refusals by bounded reason.
+pub const VAULT_RETENTION_REFUSALS_TOTAL: &str = "vault_retention_refusals_total";
+/// Terminal deletion stages by bounded stage, outcome, and failure class.
+pub const VAULT_RETENTION_STAGE_ATTEMPTS_TOTAL: &str = "vault_retention_stage_attempts_total";
+/// End-to-end duration of one terminal deletion stage.
+pub const VAULT_RETENTION_STAGE_DURATION_SECONDS: &str = "vault_retention_stage_duration_seconds";
+
+/// Closed retention evaluation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionDiagnosticMode {
+    /// Routine policy evaluation.
+    Scheduled,
+    /// Fixed-order quota-pressure escalation.
+    QuotaPressure,
+}
+
+/// Closed decision outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionDiagnosticDecision {
+    /// Snapshot selected for a grace-bounded plan.
+    Eligible,
+    /// Policy or pin protected the snapshot.
+    Protected,
+    /// Allocation or effect was refused.
+    Refused,
+}
+
+/// Closed deletion stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionDiagnosticStage {
+    /// Local content-addressed bytes.
+    Local,
+    /// Confined mutable bare mirror for a tombstoned target.
+    MirrorLocal,
+    /// One persisted replica placement.
+    Replica,
+}
+
+/// Closed terminal stage outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionDiagnosticStageOutcome {
+    /// Exact identity was verified absent.
+    Succeeded,
+    /// A retained reference suppressed the delete call.
+    SharedReferenceRetained,
+    /// The stage failed and remains retryable.
+    Failed,
+}
+
+/// Closed retention/deletion reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionDiagnosticReason {
+    /// Routine keep-N/age evaluation selected an old snapshot.
+    EligibleOrdinary,
+    /// An inactive target's grace-complete snapshot was selected.
+    EligibleInactiveTarget,
+    /// An active pin protected the evidence.
+    ProtectedPinned,
+    /// The immutable grace deadline has not arrived.
+    GraceActive,
+    /// Available grace-complete candidates could not satisfy allocation pressure.
+    AllocationRefused,
+}
+
+impl RetentionDiagnosticMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::QuotaPressure => "quota_pressure",
+        }
+    }
+}
+
+impl RetentionDiagnosticDecision {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::Protected => "protected",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+impl RetentionDiagnosticReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::EligibleOrdinary => "eligible_ordinary",
+            Self::EligibleInactiveTarget => "eligible_inactive_target",
+            Self::ProtectedPinned => "protected_pinned",
+            Self::GraceActive => "grace_active",
+            Self::AllocationRefused => "allocation_refused",
+        }
+    }
+}
+
+impl RetentionDiagnosticStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::MirrorLocal => "mirror_local",
+            Self::Replica => "replica",
+        }
+    }
+}
+
+impl RetentionDiagnosticStageOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::SharedReferenceRetained => "shared_reference_retained",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Returns the bounded decision label set.
+#[must_use]
+pub fn retention_decision_fields(
+    mode: RetentionDiagnosticMode,
+    decision: RetentionDiagnosticDecision,
+    reason: RetentionDiagnosticReason,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("mode", mode.as_str().to_owned()),
+        ("decision", decision.as_str().to_owned()),
+        ("reason", reason.as_str().to_owned()),
+    ]
+}
+
+/// Returns the bounded terminal stage label set.
+#[must_use]
+pub fn retention_stage_fields(
+    stage: RetentionDiagnosticStage,
+    outcome: RetentionDiagnosticStageOutcome,
+    failure_class: Option<&'static str>,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("stage", stage.as_str().to_owned()),
+        ("outcome", outcome.as_str().to_owned()),
+        ("failure_class", failure_class.unwrap_or("none").to_owned()),
+    ]
+}
+
+/// Emits one bounded retention decision or refusal without physical/logical identity labels.
+pub fn record_retention_decision(
+    mode: RetentionDiagnosticMode,
+    decision: RetentionDiagnosticDecision,
+    reason: RetentionDiagnosticReason,
+) {
+    let mode = mode.as_str().to_owned();
+    let decision_label = decision.as_str().to_owned();
+    let reason = reason.as_str().to_owned();
+    ::metrics::counter!(VAULT_RETENTION_DECISIONS_TOTAL,
+        "mode" => mode.clone(), "decision" => decision_label,
+        "reason" => reason.clone())
+    .increment(1);
+    if decision == RetentionDiagnosticDecision::Refused {
+        ::metrics::counter!(VAULT_RETENTION_REFUSALS_TOTAL,
+            "mode" => mode, "reason" => reason)
+        .increment(1);
+    }
+}
+
+/// Emits one terminal deletion stage and duration using only closed labels.
+pub fn record_retention_stage(
+    stage: RetentionDiagnosticStage,
+    outcome: RetentionDiagnosticStageOutcome,
+    failure_class: Option<&'static str>,
+    duration: std::time::Duration,
+) {
+    let stage = stage.as_str().to_owned();
+    let outcome = outcome.as_str().to_owned();
+    let failure = failure_class.unwrap_or("none").to_owned();
+    ::metrics::counter!(VAULT_RETENTION_STAGE_ATTEMPTS_TOTAL,
+        "stage" => stage.clone(), "outcome" => outcome.clone(),
+        "failure_class" => failure.clone())
+    .increment(1);
+    ::metrics::histogram!(VAULT_RETENTION_STAGE_DURATION_SECONDS,
+        "stage" => stage, "outcome" => outcome,
+        "failure_class" => failure)
+    .record(duration.as_secs_f64());
+}
 
 /// Closed executable collector vocabulary; provider repository names can never enter it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,5 +490,46 @@ mod tests {
         assert!(!rendered.contains("github.com"));
         assert!(rendered.contains("git_lfs"));
         assert!(rendered.contains("wiki"));
+    }
+
+    #[test]
+    fn retention_metrics_use_only_bounded_non_identity_labels() {
+        let decision = retention_decision_fields(
+            RetentionDiagnosticMode::QuotaPressure,
+            RetentionDiagnosticDecision::Refused,
+            RetentionDiagnosticReason::AllocationRefused,
+        );
+        let stage = retention_stage_fields(
+            RetentionDiagnosticStage::Replica,
+            RetentionDiagnosticStageOutcome::Failed,
+            Some("remote_still_present"),
+        );
+        assert_eq!(
+            decision.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            vec!["mode", "decision", "reason"]
+        );
+        assert_eq!(
+            stage.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            vec!["stage", "outcome", "failure_class"]
+        );
+        let rendered = format!(
+            "{decision:?}{stage:?}{VAULT_RETENTION_DECISIONS_TOTAL}\
+             {VAULT_RETENTION_REFUSALS_TOTAL}{VAULT_RETENTION_STAGE_ATTEMPTS_TOTAL}\
+             {VAULT_RETENTION_STAGE_DURATION_SECONDS}"
+        );
+        for forbidden in [
+            "target_id",
+            "snapshot_id",
+            "digest",
+            "object_key",
+            "repository",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "forbidden label: {forbidden}"
+            );
+        }
+        assert!(rendered.contains("quota_pressure"));
+        assert!(rendered.contains("remote_still_present"));
     }
 }

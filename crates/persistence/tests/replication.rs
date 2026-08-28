@@ -4,7 +4,10 @@
 
 use ratatoskr_vault_core::snapshot::{BlobRef, LfsEvidence, LfsObjectEvidence};
 use ratatoskr_vault_persistence::test_support::TestDatabase;
-use ratatoskr_vault_persistence::{ReplicaTargetObservation, SnapshotSource};
+use ratatoskr_vault_persistence::{
+    DeletionStageKind, ReplicaTargetObservation, SnapshotSource, StageClaimOutcome,
+    StageClaimRequest,
+};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -322,6 +325,129 @@ async fn expired_claim_is_recoverable_without_duplicate_live_attempt() {
         ]
     );
     fixture.cleanup().await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn deletion_staged_artifacts_are_not_due_or_claimable() {
+    let fixture = TestDatabase::create().await.expect("disposable database");
+    let artifact_id = stored_bundle(&fixture).await;
+    let (snapshot_id, target_id): (Uuid, Uuid) = sqlx::query_as(
+        "select artifacts.snapshot_id, snapshots.target_id
+         from git_vault.snapshot_artifacts artifacts
+         join git_vault.snapshots using (snapshot_id)
+         where artifacts.artifact_id = $1",
+    )
+    .bind(artifact_id)
+    .fetch_one(fixture.pool())
+    .await
+    .expect("artifact owner");
+    let replica_target_id = Uuid::now_v7();
+    fixture
+        .database
+        .observe_replica_target(&ReplicaTargetObservation {
+            replica_target_id,
+            name: "delete-staged".to_owned(),
+            endpoint_origin: "https://s3.example.invalid".to_owned(),
+            bucket: "vault".to_owned(),
+            key_prefix: "archive".to_owned(),
+            required: true,
+            enabled: true,
+        })
+        .await
+        .expect("target observation");
+    let plan_id =
+        seed_replication_deletion_plan(&fixture, artifact_id, snapshot_id, target_id).await;
+    let stage = fixture
+        .database
+        .claim_deletion_stage(&StageClaimRequest {
+            plan_id,
+            kind: DeletionStageKind::Local,
+            stage_key: format!("local:{artifact_id}"),
+            artifact_id: Some(artifact_id),
+            replica_target_id: None,
+            placement_id: None,
+            lease_owner: Uuid::now_v7(),
+            lease_seconds: 60,
+        })
+        .await
+        .expect("deletion stage claim");
+    assert!(matches!(stage, StageClaimOutcome::Claimed { .. }));
+
+    let due = fixture
+        .database
+        .due_replication_units(replica_target_id, 0, 8)
+        .await
+        .expect("due replication read");
+    assert!(
+        due.iter().all(|unit| unit.artifact_id != artifact_id),
+        "deletion-staged artifact must not be due"
+    );
+    let replication_claim = fixture
+        .database
+        .claim_replication_attempt(
+            artifact_id,
+            replica_target_id,
+            Uuid::now_v7(),
+            Duration::from_mins(1),
+        )
+        .await;
+    assert!(
+        replication_claim.is_err(),
+        "deletion-staged artifact must not admit a replication claim"
+    );
+
+    fixture.cleanup().await.expect("cleanup");
+}
+
+async fn seed_replication_deletion_plan(
+    fixture: &TestDatabase,
+    artifact_id: Uuid,
+    snapshot_id: Uuid,
+    target_id: Uuid,
+) -> Uuid {
+    let policy_id = Uuid::now_v7();
+    let evaluation_id = Uuid::now_v7();
+    let plan_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into git_vault.retention_policies
+             (policy_id, name, minimum_age_seconds, grace_seconds,
+              keep_last_restorable, created_at)
+         values ($1, $2, 0, 60, 1, now())",
+    )
+    .bind(policy_id)
+    .bind(format!("delete-staged-{artifact_id}"))
+    .execute(fixture.pool())
+    .await
+    .expect("policy");
+    sqlx::query(
+        "insert into git_vault.retention_evaluations
+             (evaluation_id, target_id, policy_id, mode, policy_snapshot, outcome,
+              correlation_id, evaluated_at)
+         values ($1, $2, $3, 'scheduled', '{}'::jsonb, 'selected', $4, now())",
+    )
+    .bind(evaluation_id)
+    .bind(target_id)
+    .bind(policy_id)
+    .bind(Uuid::now_v7())
+    .execute(fixture.pool())
+    .await
+    .expect("evaluation");
+    sqlx::query(
+        "insert into git_vault.deletion_plans
+             (plan_id, evaluation_id, target_id, snapshot_id, reason, automatic,
+              tombstoned_at, not_before, estimated_bytes, correlation_id)
+         values ($1, $2, $3, $4, 'ordinary_retention', true,
+                 now() - interval '2 hours', now() - interval '1 hour', 1, $5)",
+    )
+    .bind(plan_id)
+    .bind(evaluation_id)
+    .bind(target_id)
+    .bind(snapshot_id)
+    .bind(Uuid::now_v7())
+    .execute(fixture.pool())
+    .await
+    .expect("plan");
+    plan_id
 }
 
 async fn stored_bundle(fixture: &TestDatabase) -> Uuid {

@@ -1,9 +1,9 @@
 # Developing Ratatoskr Vault
 
-> Status: Implemented (foundation through Git LFS and wiki sibling preservation)
-> Last reviewed: 2026-08-27
+> Status: Implemented (foundation through retention and staged deletion)
+> Last reviewed: 2026-08-28
 
-The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes system Git and Git LFS binaries under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite combined byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots, signed manifests, scheduled stored-byte verification, isolated Git/LFS restore drills, verified S3-compatible replicas, and independently mirrored wiki sibling targets are implemented. Provider-API auxiliary collectors remain separately approval-gated and absent. Retention, remote deletion/lifecycle management, and event publication remain later plan items.
+The service foundation exists: a Rust workspace with typed configuration, telemetry, the admin plane, and the first version of the `git_vault` schema. Desired-state reconciliation converges delivered policies into guarded target state, `crates/gitrunner` executes system Git and Git LFS binaries under structural confinement, and the local lifecycle performs initial clone and periodic fetch with four permits, finite combined byte reservations, cancellation checkpoints, and post-operation integrity evidence. Local immutable bundle snapshots, signed manifests, scheduled stored-byte verification, isolated Git/LFS restore drills, verified S3-compatible replicas, independently mirrored wiki sibling targets, deterministic retention, source-scoped pins, fixed-grace tombstones, local-first verified deletion, per-replica verified deletion, crash recovery, and append-only audit queries are implemented. Provider-API auxiliary collectors remain separately approval-gated and absent. Provider lifecycle management, legacy adoption, and event publication remain later plan items.
 
 ## Toolchain
 
@@ -17,7 +17,13 @@ A PostgreSQL server is needed by every persistence test and by the boot test:
 docker compose up -d
 ```
 
-`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. No NATS is required. Snapshot tests use a temporary local filesystem BlobStore. Replica tests use an in-process Axum S3-compatible request-subset harness bound to `127.0.0.1:0`; they use no personal credentials or provider account and are not proof of production TLS/IAM compatibility.
+`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. No NATS is required. Snapshot tests use a temporary local filesystem BlobStore. Replica and retention-deletion tests use an in-process Axum S3-compatible request-subset harness bound to `127.0.0.1:0`; they use no personal credentials or provider account. They prove exact-key DELETE/GET absence behavior against the adapter contract, not production TLS, IAM, versioning, Object Lock, provider consistency, or lifecycle compatibility. Run a separately authorized real-provider smoke test before enabling destructive production retention.
+
+The default retention policy is keep three restorable snapshots per mirror, a 30-day age floor,
+and a 30-day immutable deletion grace. Schema bounds are documented in `README.md`. To halt a
+worker, stop retention admission/process execution and allow finite leases to expire; never edit
+deadlines or terminal evidence. Reactivation cancels only pre-effect plans. Bytes already verified
+absent require restore/republication from retained evidence; metadata rollback alone is forbidden.
 
 ### Rust — also the CI gate
 

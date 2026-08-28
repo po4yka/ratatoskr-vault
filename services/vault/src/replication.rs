@@ -289,7 +289,9 @@ const fn replica_diagnostic_failure(error: ReplicaError) -> ReplicationDiagnosti
         ReplicaError::InvalidInput | ReplicaError::SourceIo | ReplicaError::DigestMismatch => {
             ReplicationDiagnosticFailure::Local
         }
-        ReplicaError::Remote => ReplicationDiagnosticFailure::Remote,
+        ReplicaError::Remote | ReplicaError::RemoteStillPresent => {
+            ReplicationDiagnosticFailure::Remote
+        }
         ReplicaError::NotFound => ReplicationDiagnosticFailure::RemoteAbsent,
         ReplicaError::Timeout => ReplicationDiagnosticFailure::Timeout,
         ReplicaError::RemoteChecksumMismatch => ReplicationDiagnosticFailure::Checksum,
@@ -306,6 +308,7 @@ const fn replica_failure_class(error: ReplicaError) -> &'static str {
         ReplicaError::InvalidInput => "invalid_input",
         ReplicaError::SourceIo => "local_io",
         ReplicaError::Remote => "remote",
+        ReplicaError::RemoteStillPresent => "remote_still_present",
         ReplicaError::NotFound => "remote_absent",
         ReplicaError::Timeout => "timeout",
         ReplicaError::DigestMismatch => "local_digest_mismatch",

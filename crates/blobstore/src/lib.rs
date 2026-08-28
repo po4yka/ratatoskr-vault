@@ -25,6 +25,15 @@ pub struct LocalBlobStore {
     max_bytes: u64,
 }
 
+/// Verified terminal result of one exact content-addressed local deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalDeleteOutcome {
+    /// The exact regular file was removed and verified absent.
+    Deleted,
+    /// The exact digest-derived path was already absent.
+    AlreadyAbsent,
+}
+
 /// The publication error returned by the test seam before the implementation exists.
 #[derive(Debug)]
 pub enum BlobStoreError {
@@ -228,6 +237,45 @@ impl LocalBlobStore {
             Ok(())
         } else {
             Err(BlobStoreError::DigestMismatch)
+        }
+    }
+
+    /// Deletes only the exact digest-derived local blob and verifies absence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the reference or stored object is unsafe to remove.
+    pub fn delete_verified_blob(
+        &self,
+        reference: &BlobRef,
+    ) -> Result<LocalDeleteOutcome, BlobStoreError> {
+        Self::validate_reference(reference)?;
+        let path = self.path_for(reference)?;
+        let parent = path.parent().ok_or(BlobStoreError::InvalidInput)?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LocalDeleteOutcome::AlreadyAbsent);
+            }
+            Err(error) => return Err(BlobStoreError::Io(error)),
+        };
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(BlobStoreError::InvalidInput);
+        }
+        let canonical_root = std::fs::canonicalize(&self.root)?;
+        let canonical_parent = std::fs::canonicalize(parent)?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(BlobStoreError::InvalidInput);
+        }
+        self.verify(reference)?;
+        std::fs::remove_file(&path)?;
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                File::open(parent)?.sync_all()?;
+                Ok(LocalDeleteOutcome::Deleted)
+            }
+            Ok(_) => Err(BlobStoreError::ExistingContentMismatch),
+            Err(error) => Err(BlobStoreError::Io(error)),
         }
     }
 

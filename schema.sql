@@ -70,7 +70,7 @@ create table git_vault.targets (
     constraint targets_status_is_known
         check (status in (
             'requested', 'cloning', 'ready', 'fetching', 'snapshotting', 'verifying',
-            'healthy', 'degraded', 'paused', 'excluded', 'deleting'
+            'healthy', 'degraded', 'paused', 'excluded', 'deleting', 'deleted'
         )),
     constraint targets_updated_at_is_not_before_created_at
         check (updated_at >= created_at)
@@ -85,7 +85,7 @@ comment on column git_vault.targets.pinned is
     '(docs/ARCHITECTURE.md section 5.2).';
 comment on column git_vault.targets.status is
     'requested | cloning | ready | fetching | snapshotting | verifying | healthy | degraded | '
-    'paused | excluded | deleting';
+    'paused | excluded | deleting | deleted';
 
 -- One provider repository is at most one target, so reconciliation of duplicate events converges.
 create unique index targets_repository_provider_external_id_key
@@ -118,6 +118,7 @@ as $$
         when 'paused'       then 8
         when 'excluded'     then 9
         when 'deleting'     then 10
+        when 'deleted'      then 11
     end
 $$;
 
@@ -134,6 +135,53 @@ begin
         return new;
     end if;
 
+    if old.status = 'excluded' and new.status = 'deleting' and (
+        old.pinned
+        or not exists (
+            select 1
+            from git_vault.tombstones tombstone
+            where tombstone.target_id = old.target_id
+              and tombstone.cancelled_at is null
+              and tombstone.completed_at is null
+              and clock_timestamp() >= tombstone.not_before
+              and exists (
+                  select 1 from git_vault.deletion_plans plan
+                  where plan.tombstone_id = tombstone.tombstone_id
+                    and plan.status not in ('completed', 'cancelled')
+              )
+              and not exists (
+                  select 1
+                  from git_vault.deletion_plans plan
+                  join git_vault.snapshot_pins pin using (snapshot_id)
+                  where plan.tombstone_id = tombstone.tombstone_id
+                    and plan.status not in ('completed', 'cancelled')
+                    and pin.revoked_at is null
+              )
+        )
+    ) then
+        raise exception 'target deletion requires executable unpinned tombstone evidence'
+            using errcode = 'VLT05';
+    end if;
+
+    if old.status = 'deleting' and new.status = 'deleted' and not exists (
+        select 1
+        from git_vault.tombstones tombstone
+        where tombstone.target_id = old.target_id
+          and tombstone.completed_at is not null
+          and exists (
+              select 1 from git_vault.deletion_plans plan
+              where plan.tombstone_id = tombstone.tombstone_id
+          )
+          and not exists (
+              select 1 from git_vault.deletion_plans plan
+              where plan.tombstone_id = tombstone.tombstone_id
+                and plan.status <> 'completed'
+          )
+    ) then
+        raise exception 'target deletion completion requires terminal plan evidence'
+            using errcode = 'VLT06';
+    end if;
+
     -- The single normative pair set, mirrored from ratatoskr_vault_core::Transition::TRANSITIONS.
     -- The agreement walk asserts the two agree on every ordered pair, because two enforcement
     -- points that disagree are worse than one.
@@ -142,43 +190,35 @@ begin
         from (values
             ('requested',    'cloning'),
             ('requested',    'excluded'),
-            ('requested',    'deleting'),
             ('cloning',      'ready'),
             ('cloning',      'degraded'),
             ('cloning',      'excluded'),
-            ('cloning',      'deleting'),
             ('ready',        'fetching'),
             ('ready',        'degraded'),
             ('ready',        'paused'),
             ('ready',        'excluded'),
-            ('ready',        'deleting'),
             ('fetching',     'snapshotting'),
             ('fetching',     'ready'),
             ('fetching',     'degraded'),
             ('fetching',     'paused'),
             ('fetching',     'excluded'),
-            ('fetching',     'deleting'),
             ('snapshotting', 'verifying'),
             ('snapshotting', 'degraded'),
-            ('snapshotting', 'deleting'),
             ('verifying',    'healthy'),
             ('verifying',    'degraded'),
-            ('verifying',    'deleting'),
             ('healthy',      'fetching'),
             ('healthy',      'degraded'),
             ('healthy',      'paused'),
             ('healthy',      'excluded'),
-            ('healthy',      'deleting'),
             ('degraded',     'fetching'),
             ('degraded',     'cloning'),
             ('degraded',     'paused'),
             ('degraded',     'excluded'),
-            ('degraded',     'deleting'),
             ('paused',       'ready'),
             ('paused',       'excluded'),
-            ('paused',       'deleting'),
             ('excluded',     'requested'),
-            ('excluded',     'deleting')
+            ('excluded',     'deleting'),
+            ('deleting',     'deleted')
         ) as legal(from_status, to_status)
         where legal.from_status = old.status
           and legal.to_status = new.status
@@ -605,11 +645,21 @@ create trigger lfs_snapshot_objects_are_append_only
 -- ---------------------------------------------------------------------------------------------
 
 create table git_vault.retention_policies (
-    policy_id           uuid        primary key,
-    name                text        not null,
-    grace_days          integer     not null check (grace_days between 0 and 3650),
-    keep_last_verified  integer     not null check (keep_last_verified >= 1),
-    created_at          timestamptz not null
+    policy_id             uuid        primary key,
+    name                  text        not null,
+    minimum_age_seconds   bigint      not null,
+    grace_seconds         bigint      not null,
+    keep_last_restorable  integer     not null,
+    created_at            timestamptz not null,
+
+    constraint retention_policies_name_is_bounded
+        check (length(name) between 1 and 128),
+    constraint retention_policies_minimum_age_is_bounded
+        check (minimum_age_seconds between 0 and 315360000),
+    constraint retention_policies_grace_is_positive_and_bounded
+        check (grace_seconds between 1 and 315360000),
+    constraint retention_policies_keep_last_is_positive
+        check (keep_last_restorable between 1 and 1000000)
 );
 
 comment on table git_vault.retention_policies is
@@ -618,19 +668,147 @@ comment on table git_vault.retention_policies is
 create unique index retention_policies_name_key on git_vault.retention_policies (name);
 
 -- ---------------------------------------------------------------------------------------------
+-- snapshot_pins: source-scoped protection with one-way revocation
+-- ---------------------------------------------------------------------------------------------
+
+create table git_vault.snapshot_pins (
+    pin_id                     uuid        primary key,
+    snapshot_id                uuid        not null references git_vault.snapshots (snapshot_id),
+    source                     text        not null,
+    source_reference           text        not null,
+    correlation_id             uuid        not null,
+    pinned_at                  timestamptz not null,
+    revoked_at                 timestamptz,
+    revocation_correlation_id  uuid,
+
+    constraint snapshot_pins_source_is_known
+        check (source in ('operator', 'user')),
+    constraint snapshot_pins_reference_is_bounded
+        check (length(source_reference) between 1 and 255),
+    constraint snapshot_pins_revocation_is_consistent
+        check ((revoked_at is null) = (revocation_correlation_id is null)
+            and (revoked_at is null or revoked_at >= pinned_at))
+);
+
+comment on table git_vault.snapshot_pins is
+    'Durable operator/user protection. Revocation closes this row once; neither action erases '
+    'history or authorizes deletion before a later retention evaluation and grace window.';
+create unique index snapshot_pins_one_active_source_key
+    on git_vault.snapshot_pins (snapshot_id, source, source_reference)
+    where revoked_at is null;
+create index snapshot_pins_snapshot_active_idx
+    on git_vault.snapshot_pins (snapshot_id) where revoked_at is null;
+
+create function git_vault.guard_snapshot_pin_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+    if tg_op = 'DELETE' then
+        raise exception 'snapshot pin history is append-only';
+    end if;
+    if old.revoked_at is not null
+        or new.pin_id <> old.pin_id
+        or new.snapshot_id <> old.snapshot_id
+        or new.source <> old.source
+        or new.source_reference <> old.source_reference
+        or new.correlation_id <> old.correlation_id
+        or new.pinned_at <> old.pinned_at
+        or new.revoked_at is null
+        or new.revocation_correlation_id is null then
+        raise exception 'snapshot pin identity is immutable and revocation is one-way';
+    end if;
+    return new;
+end;
+$$;
+
+create trigger snapshot_pins_guard_update
+    before update on git_vault.snapshot_pins
+    for each row execute function git_vault.guard_snapshot_pin_mutation();
+create trigger snapshot_pins_guard_delete
+    before delete on git_vault.snapshot_pins
+    for each row execute function git_vault.guard_snapshot_pin_mutation();
+
+-- ---------------------------------------------------------------------------------------------
+-- retention_evaluations and candidates: immutable explanation of every policy decision
+-- ---------------------------------------------------------------------------------------------
+
+create table git_vault.retention_evaluations (
+    evaluation_id   uuid        primary key,
+    target_id       uuid        not null references git_vault.targets (target_id),
+    policy_id       uuid        not null references git_vault.retention_policies (policy_id),
+    mode            text        not null,
+    policy_snapshot jsonb       not null check (jsonb_typeof(policy_snapshot) = 'object'),
+    required_bytes  bigint,
+    outcome         text        not null,
+    correlation_id  uuid        not null,
+    evaluated_at    timestamptz not null,
+
+    constraint retention_evaluations_mode_is_known
+        check (mode in ('scheduled', 'quota_pressure')),
+    constraint retention_evaluations_required_bytes_match_mode
+        check ((mode = 'scheduled' and required_bytes is null)
+            or (mode = 'quota_pressure' and required_bytes > 0)),
+    constraint retention_evaluations_outcome_is_known
+        check (outcome in ('selected', 'no_candidates', 'allocation_refused'))
+);
+
+create index retention_evaluations_target_time_idx
+    on git_vault.retention_evaluations (target_id, evaluated_at, evaluation_id);
+
+create table git_vault.retention_candidates (
+    evaluation_id       uuid        not null references git_vault.retention_evaluations (evaluation_id),
+    snapshot_id         uuid        not null references git_vault.snapshots (snapshot_id),
+    ordinal             integer     not null check (ordinal >= 0),
+    classification      text        not null,
+    pin_sources         jsonb       not null check (jsonb_typeof(pin_sources) = 'array'),
+    target_inactive     boolean     not null,
+    estimated_bytes     bigint      not null check (estimated_bytes >= 0),
+    deletion_not_before timestamptz,
+
+    constraint retention_candidates_classification_is_known
+        check (classification in (
+            'eligible_ordinary', 'eligible_inactive_target', 'protected_pinned',
+            'protected_age_floor', 'protected_keep_last_restorable', 'grace_active'
+        )),
+    constraint retention_candidates_key primary key (evaluation_id, snapshot_id),
+    constraint retention_candidates_ordinal_key unique (evaluation_id, ordinal)
+);
+
+create index retention_candidates_snapshot_idx
+    on git_vault.retention_candidates (snapshot_id, evaluation_id);
+
+create trigger retention_evaluations_are_append_only
+    before update or delete on git_vault.retention_evaluations
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
+create trigger retention_candidates_are_append_only
+    before update or delete on git_vault.retention_candidates
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
+
+-- ---------------------------------------------------------------------------------------------
 -- tombstones: the audit record that a target was retired, and what still must be kept
 -- ---------------------------------------------------------------------------------------------
 
 create table git_vault.tombstones (
-    tombstone_id    uuid        primary key,
-    target_id       uuid        not null references git_vault.targets (target_id),
-    reason          text        not null,
-    was_pinned      boolean     not null,
-    purge_after     timestamptz,
-    recorded_at     timestamptz not null,
+    tombstone_id              uuid        primary key,
+    target_id                 uuid        not null references git_vault.targets (target_id),
+    governing_policy_revision bigint      not null check (governing_policy_revision > 0),
+    reason                    text        not null,
+    was_pinned                boolean     not null,
+    correlation_id            uuid        not null,
+    recorded_at               timestamptz not null,
+    not_before                timestamptz not null,
+    cancelled_at              timestamptz,
+    completed_at              timestamptz,
 
     constraint tombstones_reason_is_known
-        check (reason in ('policy_inactive', 'retention_expired', 'operator_request'))
+        check (reason in ('policy_inactive', 'retention_expired', 'operator_request')),
+    constraint tombstones_window_is_positive
+        check (not_before > recorded_at),
+    constraint tombstones_terminal_state_is_consistent
+        check (not (cancelled_at is not null and completed_at is not null)
+            and (cancelled_at is null or cancelled_at >= recorded_at)
+            and (completed_at is null or completed_at >= not_before))
 );
 
 comment on table git_vault.tombstones is
@@ -640,7 +818,248 @@ comment on column git_vault.tombstones.was_pinned is
     'Evidence at recording time. A target that was pinned reached a tombstone only through an '
     'explicit unpin, and the audit trail shows it.';
 create unique index tombstones_target_active_key
-    on git_vault.tombstones (target_id) where purge_after is null;
+    on git_vault.tombstones (target_id)
+    where cancelled_at is null and completed_at is null;
+
+create function git_vault.guard_tombstone_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+    if tg_op = 'DELETE' then
+        raise exception 'target tombstone evidence is append-only';
+    end if;
+    if old.cancelled_at is not null or old.completed_at is not null
+        or new.tombstone_id <> old.tombstone_id
+        or new.target_id <> old.target_id
+        or new.governing_policy_revision <> old.governing_policy_revision
+        or new.reason <> old.reason
+        or new.was_pinned <> old.was_pinned
+        or new.correlation_id <> old.correlation_id
+        or new.recorded_at <> old.recorded_at
+        or new.not_before <> old.not_before
+        or ((new.cancelled_at is null) = (new.completed_at is null)) then
+        raise exception 'tombstone identity and deadline are immutable and closure is one-way';
+    end if;
+    return new;
+end;
+$$;
+
+create trigger tombstones_guard_update
+    before update on git_vault.tombstones
+    for each row execute function git_vault.guard_tombstone_mutation();
+create trigger tombstones_guard_delete
+    before delete on git_vault.tombstones
+    for each row execute function git_vault.guard_tombstone_mutation();
+
+-- ---------------------------------------------------------------------------------------------
+-- deletion plans and physical-object claims: authorized, grace-bounded external effects
+-- ---------------------------------------------------------------------------------------------
+
+create table git_vault.deletion_plans (
+    plan_id              uuid        primary key,
+    evaluation_id        uuid        not null references git_vault.retention_evaluations (evaluation_id),
+    target_id            uuid        not null references git_vault.targets (target_id),
+    snapshot_id          uuid        not null references git_vault.snapshots (snapshot_id),
+    tombstone_id         uuid        references git_vault.tombstones (tombstone_id),
+    reason               text        not null,
+    automatic            boolean     not null,
+    tombstoned_at        timestamptz not null,
+    not_before           timestamptz not null,
+    estimated_bytes      bigint      not null check (estimated_bytes >= 0),
+    status               text        not null default 'planned',
+    correlation_id       uuid        not null,
+    cancelled_at         timestamptz,
+    completed_at         timestamptz,
+
+    constraint deletion_plans_reason_is_known
+        check (reason in ('ordinary_retention', 'target_inactive', 'operator_request')),
+    constraint deletion_plans_window_is_positive
+        check (not_before > tombstoned_at),
+    constraint deletion_plans_status_is_known
+        check (status in ('planned', 'local_deleting', 'replica_deleting', 'completed', 'cancelled')),
+    constraint deletion_plans_terminal_state_is_consistent
+        check ((status = 'completed' and completed_at is not null and cancelled_at is null)
+            or (status = 'cancelled' and cancelled_at is not null and completed_at is null)
+            or (status not in ('completed', 'cancelled')
+                and completed_at is null and cancelled_at is null))
+);
+
+create unique index deletion_plans_one_active_snapshot_key
+    on git_vault.deletion_plans (snapshot_id)
+    where status not in ('completed', 'cancelled');
+create index deletion_plans_target_status_idx
+    on git_vault.deletion_plans (target_id, status, not_before);
+
+create function git_vault.guard_deletion_plan_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+    if tg_op = 'DELETE' then
+        raise exception 'deletion plan evidence is append-only';
+    end if;
+    if tg_op = 'INSERT' then
+        if new.automatic and exists (
+            select 1 from git_vault.snapshot_pins
+            where snapshot_id = new.snapshot_id and revoked_at is null
+        ) then
+            raise exception 'active snapshot pin blocks automatic deletion plan'
+                using errcode = 'VLT02';
+        end if;
+        return new;
+    end if;
+    if old.status in ('completed', 'cancelled')
+        or new.plan_id <> old.plan_id
+        or new.evaluation_id <> old.evaluation_id
+        or new.target_id <> old.target_id
+        or new.snapshot_id <> old.snapshot_id
+        or new.tombstone_id is distinct from old.tombstone_id
+        or new.reason <> old.reason
+        or new.automatic <> old.automatic
+        or new.tombstoned_at <> old.tombstoned_at
+        or new.not_before <> old.not_before
+        or new.estimated_bytes <> old.estimated_bytes
+        or new.correlation_id <> old.correlation_id then
+        raise exception 'deletion plan identity and deadline are immutable';
+    end if;
+    if not ((old.status = 'planned' and new.status in ('local_deleting', 'cancelled'))
+        or (old.status = 'local_deleting' and new.status = 'replica_deleting')
+        or (old.status = 'replica_deleting' and new.status = 'completed')) then
+        raise exception 'illegal deletion plan transition % -> %', old.status, new.status;
+    end if;
+    if new.status = 'completed' and (
+        exists (
+            select 1 from git_vault.snapshot_artifacts artifact
+            where artifact.snapshot_id = new.snapshot_id
+              and not exists (
+                  select 1 from git_vault.deletion_stage_attempts stage
+                  where stage.plan_id = new.plan_id
+                    and stage.stage_kind = 'local'
+                    and stage.artifact_id = artifact.artifact_id
+                    and stage.outcome in ('succeeded', 'shared_reference_retained')
+              )
+        )
+        or exists (
+            select 1
+            from git_vault.replica_placements placement
+            join git_vault.snapshot_artifacts artifact using (artifact_id)
+            where artifact.snapshot_id = new.snapshot_id
+              and not exists (
+                  select 1 from git_vault.deletion_stage_attempts stage
+                  where stage.plan_id = new.plan_id
+                    and stage.stage_kind = 'replica'
+                    and stage.placement_id = placement.placement_id
+                  and stage.outcome in ('succeeded', 'shared_reference_retained')
+              )
+        )
+        or (new.tombstone_id is not null and not exists (
+            select 1 from git_vault.deletion_stage_attempts stage
+            where stage.plan_id = new.plan_id
+              and stage.stage_kind = 'mirror_local'
+              and stage.outcome = 'succeeded'
+        ))
+    ) then
+        raise exception 'deletion plan cannot complete with missing terminal stages';
+    end if;
+    return new;
+end;
+$$;
+
+create trigger deletion_plans_guard_insert_or_update
+    before insert or update on git_vault.deletion_plans
+    for each row execute function git_vault.guard_deletion_plan_mutation();
+create trigger deletion_plans_guard_delete
+    before delete on git_vault.deletion_plans
+    for each row execute function git_vault.guard_deletion_plan_mutation();
+
+create table git_vault.physical_object_claims (
+    claim_id         uuid        primary key,
+    plan_id          uuid        not null references git_vault.deletion_plans (plan_id),
+    identity_kind    text        not null,
+    identity_key     text        not null,
+    lease_owner      uuid        not null,
+    lease_expires_at timestamptz not null,
+    outcome          text        not null default 'running',
+    failure_class    text,
+    started_at       timestamptz not null,
+    finished_at      timestamptz,
+
+    constraint physical_object_claims_kind_is_known
+        check (identity_kind in ('local_digest', 'mirror_path', 'replica_key')),
+    constraint physical_object_claims_key_is_bounded
+        check (length(identity_key) between 1 and 768),
+    constraint physical_object_claims_outcome_is_known
+        check (outcome in ('running', 'completed', 'abandoned')),
+    constraint physical_object_claims_terminal_state_is_consistent
+        check ((outcome = 'running' and finished_at is null and failure_class is null)
+            or (outcome = 'completed' and finished_at is not null and failure_class is null)
+            or (outcome = 'abandoned' and finished_at is not null and failure_class is not null)),
+    constraint physical_object_claims_times_are_ordered
+        check (started_at <= lease_expires_at and (finished_at is null or finished_at >= started_at))
+);
+
+create unique index physical_object_claims_one_live_identity_key
+    on git_vault.physical_object_claims (identity_kind, identity_key)
+    where outcome = 'running';
+create index physical_object_claims_lease_idx
+    on git_vault.physical_object_claims (lease_expires_at) where outcome = 'running';
+
+create function git_vault.guard_physical_object_claim_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+    if tg_op = 'DELETE' or old.outcome <> 'running'
+        or new.claim_id <> old.claim_id
+        or new.plan_id <> old.plan_id
+        or new.identity_kind <> old.identity_kind
+        or new.identity_key <> old.identity_key
+        or new.lease_owner <> old.lease_owner
+        or new.lease_expires_at <> old.lease_expires_at
+        or new.started_at <> old.started_at then
+        raise exception 'physical-object claim identity and terminal evidence are immutable';
+    end if;
+    return new;
+end;
+$$;
+
+create trigger physical_object_claims_guard_update
+    before update on git_vault.physical_object_claims
+    for each row execute function git_vault.guard_physical_object_claim_mutation();
+create trigger physical_object_claims_guard_delete
+    before delete on git_vault.physical_object_claims
+    for each row execute function git_vault.guard_physical_object_claim_mutation();
+
+create table git_vault.retention_audit (
+    audit_id       uuid        primary key,
+    target_id      uuid        not null references git_vault.targets (target_id),
+    snapshot_id    uuid        references git_vault.snapshots (snapshot_id),
+    evaluation_id  uuid        references git_vault.retention_evaluations (evaluation_id),
+    plan_id        uuid        references git_vault.deletion_plans (plan_id),
+    event_kind     text        not null,
+    reason         text        not null,
+    outcome        text        not null,
+    correlation_id uuid        not null,
+    details        jsonb       not null check (jsonb_typeof(details) = 'object'),
+    occurred_at    timestamptz not null,
+
+    constraint retention_audit_event_is_known
+        check (event_kind in ('pin', 'unpin', 'evaluation', 'tombstone', 'plan', 'stage', 'refusal')),
+    constraint retention_audit_reason_is_bounded
+        check (length(reason) between 1 and 64),
+    constraint retention_audit_outcome_is_bounded
+        check (length(outcome) between 1 and 64)
+);
+
+create index retention_audit_target_time_idx
+    on git_vault.retention_audit (target_id, occurred_at, audit_id);
+create index retention_audit_snapshot_time_idx
+    on git_vault.retention_audit (snapshot_id, occurred_at, audit_id)
+    where snapshot_id is not null;
+create trigger retention_audit_is_append_only
+    before update or delete on git_vault.retention_audit
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
 
 -- ---------------------------------------------------------------------------------------------
 -- storage_locations: backends Vault may place bytes in
@@ -798,6 +1217,150 @@ create trigger replication_attempts_guard_update
 create trigger replication_attempts_guard_delete
     before delete on git_vault.replication_attempts
     for each row execute function git_vault.guard_replication_attempt_mutation();
+
+-- ---------------------------------------------------------------------------------------------
+-- deletion_stage_attempts: ordered local-first, replica-second journal
+-- ---------------------------------------------------------------------------------------------
+
+create table git_vault.deletion_stage_attempts (
+    attempt_id        uuid        primary key,
+    plan_id           uuid        not null references git_vault.deletion_plans (plan_id),
+    stage_kind        text        not null,
+    stage_key         text        not null,
+    artifact_id       uuid        references git_vault.snapshot_artifacts (artifact_id),
+    replica_target_id uuid        references git_vault.replica_targets (replica_target_id),
+    placement_id      uuid        references git_vault.replica_placements (placement_id),
+    claim_id          uuid        references git_vault.physical_object_claims (claim_id),
+    ordinal           integer     not null check (ordinal >= 0),
+    outcome           text        not null,
+    failure_class     text,
+    lease_owner       uuid        not null,
+    lease_expires_at  timestamptz not null,
+    absence_verified  boolean     not null default false,
+    started_at        timestamptz not null,
+    finished_at       timestamptz,
+
+    constraint deletion_stage_attempts_kind_is_known
+        check (stage_kind in ('local', 'mirror_local', 'replica')),
+    constraint deletion_stage_attempts_key_is_bounded
+        check (length(stage_key) between 1 and 255),
+    constraint deletion_stage_attempts_shape_is_consistent
+        check ((stage_kind = 'local' and artifact_id is not null
+                    and replica_target_id is null and placement_id is null)
+            or (stage_kind = 'mirror_local' and artifact_id is null
+                    and replica_target_id is null and placement_id is null)
+            or (stage_kind = 'replica' and artifact_id is not null
+                    and replica_target_id is not null and placement_id is not null)),
+    constraint deletion_stage_attempts_outcome_is_known
+        check (outcome in (
+            'running', 'succeeded', 'failed', 'abandoned',
+            'shared_reference_retained', 'refused'
+        )),
+    constraint deletion_stage_attempts_terminal_state_is_consistent
+        check ((outcome = 'running' and finished_at is null and failure_class is null
+                    and not absence_verified)
+            or (outcome = 'succeeded' and finished_at is not null and failure_class is null
+                    and absence_verified)
+            or (outcome = 'shared_reference_retained' and finished_at is not null
+                    and failure_class is null and not absence_verified)
+            or (outcome in ('failed', 'abandoned', 'refused') and finished_at is not null
+                    and failure_class is not null and not absence_verified)),
+    constraint deletion_stage_attempts_times_are_ordered
+        check (started_at <= lease_expires_at and (finished_at is null or finished_at >= started_at)),
+    constraint deletion_stage_attempts_plan_ordinal_key unique (plan_id, ordinal)
+);
+
+create unique index deletion_stage_attempts_one_live_unit_key
+    on git_vault.deletion_stage_attempts (plan_id, stage_kind, stage_key)
+    where outcome = 'running';
+create index deletion_stage_attempts_plan_time_idx
+    on git_vault.deletion_stage_attempts (plan_id, started_at, attempt_id);
+create index deletion_stage_attempts_lease_idx
+    on git_vault.deletion_stage_attempts (lease_expires_at) where outcome = 'running';
+
+create function git_vault.guard_deletion_stage_attempt()
+returns trigger
+language plpgsql
+as $$
+declare
+    deadline timestamptz;
+    target_tombstone uuid;
+    plan_snapshot uuid;
+begin
+    if tg_op = 'DELETE' then
+        raise exception 'deletion stage evidence is append-only';
+    end if;
+    if tg_op = 'INSERT' then
+        select not_before, tombstone_id, snapshot_id
+        into deadline, target_tombstone, plan_snapshot
+        from git_vault.deletion_plans
+        where plan_id = new.plan_id
+        for update;
+        if deadline is null or clock_timestamp() < deadline then
+            raise exception 'deletion grace window is active' using errcode = 'VLT03';
+        end if;
+        if new.stage_kind = 'replica' and not exists (
+            select 1 from git_vault.deletion_stage_attempts local_stage
+            where local_stage.plan_id = new.plan_id
+              and local_stage.stage_kind = 'local'
+              and local_stage.artifact_id = new.artifact_id
+              and local_stage.outcome in ('succeeded', 'shared_reference_retained')
+        ) then
+            raise exception 'replica deletion requires terminal local evidence'
+                using errcode = 'VLT04';
+        end if;
+        if new.stage_kind = 'mirror_local' and (
+            target_tombstone is null or exists (
+                select 1 from git_vault.snapshot_artifacts artifact
+                where artifact.snapshot_id = plan_snapshot
+                  and not exists (
+                      select 1 from git_vault.deletion_stage_attempts local_stage
+                      where local_stage.plan_id = new.plan_id
+                        and local_stage.stage_kind = 'local'
+                        and local_stage.artifact_id = artifact.artifact_id
+                        and local_stage.outcome in ('succeeded', 'shared_reference_retained')
+                  )
+            )
+        ) then
+            raise exception 'mirror deletion requires tombstone and terminal local artifacts'
+                using errcode = 'VLT04';
+        end if;
+        if new.stage_kind = 'replica' and target_tombstone is not null and not exists (
+            select 1 from git_vault.deletion_stage_attempts mirror_stage
+            where mirror_stage.plan_id = new.plan_id
+              and mirror_stage.stage_kind = 'mirror_local'
+              and mirror_stage.outcome = 'succeeded'
+        ) then
+            raise exception 'replica deletion requires terminal local mirror evidence'
+                using errcode = 'VLT04';
+        end if;
+        return new;
+    end if;
+    if old.outcome <> 'running'
+        or new.attempt_id <> old.attempt_id
+        or new.plan_id <> old.plan_id
+        or new.stage_kind <> old.stage_kind
+        or new.stage_key <> old.stage_key
+        or new.artifact_id is distinct from old.artifact_id
+        or new.replica_target_id is distinct from old.replica_target_id
+        or new.placement_id is distinct from old.placement_id
+        or new.claim_id is distinct from old.claim_id
+        or new.ordinal <> old.ordinal
+        or new.lease_owner <> old.lease_owner
+        or new.lease_expires_at <> old.lease_expires_at
+        or new.started_at <> old.started_at then
+        raise exception 'deletion stage identity and terminal evidence are immutable';
+    end if;
+    return new;
+end;
+$$;
+
+create trigger deletion_stage_attempts_guard_insert_or_update
+    before insert or update on git_vault.deletion_stage_attempts
+    for each row execute function git_vault.guard_deletion_stage_attempt();
+create trigger deletion_stage_attempts_guard_delete
+    before delete on git_vault.deletion_stage_attempts
+    for each row execute function git_vault.guard_deletion_stage_attempt();
 
 -- ---------------------------------------------------------------------------------------------
 -- collector_runs: completeness of each auxiliary collection behind a complete archive

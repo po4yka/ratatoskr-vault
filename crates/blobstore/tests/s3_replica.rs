@@ -7,7 +7,7 @@ mod support;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use ratatoskr_vault_blobstore::replica::{ReplicaError, ReplicaStore};
+use ratatoskr_vault_blobstore::replica::{ReplicaDeleteOutcome, ReplicaError, ReplicaStore};
 use ratatoskr_vault_core::config::{ReplicaTargetConfig, ReplicasConfig};
 use ratatoskr_vault_core::snapshot::BlobRef;
 use secrecy::SecretString;
@@ -71,6 +71,45 @@ async fn remote_corruption_never_returns_verified_placement() {
         Err(ReplicaError::RemoteChecksumMismatch),
         "corrupted re-download must have its closed remote checksum class; requests={:?}",
         fixture.requests()
+    );
+    let _ignored = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn delete_requires_verified_remote_absence() {
+    let fixture = S3Fixture::start().await;
+    let root = fixture_root("delete-absence");
+    std::fs::create_dir_all(&root).expect("fixture root must be created");
+    let source = root.join("bundle.bin");
+    let bytes = b"delete acknowledgement is not absence proof";
+    std::fs::write(&source, bytes).expect("fixture bundle must be written");
+    let reference = BlobRef {
+        owner: "ratatoskr-vault".to_owned(),
+        sha256: hex_digest(Sha256::digest(bytes)),
+        media_type: "application/x-git-bundle".to_owned(),
+        size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    };
+    let store = ReplicaStore::new("offsite".to_owned(), target(fixture.endpoint()))
+        .expect("fixture replica store must build");
+    let placement = store
+        .upload_and_verify(&reference, &source)
+        .await
+        .expect("fixture placement must verify");
+    fixture.retain_next_delete();
+
+    assert_eq!(
+        store.delete_verified(&reference, &placement).await,
+        Err(ReplicaError::RemoteStillPresent),
+        "DELETE acknowledgement is insufficient; requests={:?}",
+        fixture.requests()
+    );
+    assert_eq!(
+        store.delete_verified(&reference, &placement).await,
+        Ok(ReplicaDeleteOutcome::Deleted)
+    );
+    assert_eq!(
+        store.delete_verified(&reference, &placement).await,
+        Ok(ReplicaDeleteOutcome::AlreadyAbsent)
     );
     let _ignored = std::fs::remove_dir_all(root);
 }

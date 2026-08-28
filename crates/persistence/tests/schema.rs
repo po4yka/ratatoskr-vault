@@ -227,3 +227,65 @@ async fn collector_and_target_schema_is_closed_to_approved_lfs_and_wiki_shapes()
 
     fixture.cleanup().await.expect("cleanup");
 }
+
+/// The current schema carries the whole retention/deletion evidence model; no later migration is
+/// expected to fill in a partial foundation.
+#[tokio::test]
+async fn current_schema_has_retention_deletion_evidence() {
+    let fixture = test_database().await;
+    let required_tables = [
+        "snapshot_pins",
+        "retention_evaluations",
+        "retention_candidates",
+        "deletion_plans",
+        "deletion_stage_attempts",
+        "physical_object_claims",
+        "retention_audit",
+    ];
+    let mut missing = Vec::new();
+    for table in required_tables {
+        let present: Option<String> =
+            sqlx::query_scalar(&format!("select to_regclass('git_vault.{table}')::text"))
+                .fetch_one(fixture.pool())
+                .await
+                .expect("retention table catalogue query must run");
+        if present.is_none() {
+            missing.push(table);
+        }
+    }
+
+    let policy_columns: Vec<String> = sqlx::query_scalar(
+        "select column_name from information_schema.columns
+         where table_schema = 'git_vault' and table_name = 'retention_policies'
+           and column_name in ('minimum_age_seconds', 'grace_seconds',
+                               'keep_last_restorable')
+         order by column_name",
+    )
+    .fetch_all(fixture.pool())
+    .await
+    .expect("retention policy columns must query");
+    let guard_functions: Vec<String> = sqlx::query_scalar(
+        "select proname from pg_proc
+         join pg_namespace on pg_namespace.oid = pg_proc.pronamespace
+         where pg_namespace.nspname = 'git_vault'
+           and proname in ('guard_snapshot_pin_mutation', 'guard_tombstone_mutation',
+                           'guard_deletion_plan_mutation', 'guard_deletion_stage_attempt')
+         order by proname",
+    )
+    .fetch_all(fixture.pool())
+    .await
+    .expect("retention guard inventory must query");
+
+    assert!(missing.is_empty(), "missing retention tables: {missing:?}");
+    assert_eq!(
+        policy_columns,
+        [
+            "grace_seconds",
+            "keep_last_restorable",
+            "minimum_age_seconds"
+        ]
+    );
+    assert_eq!(guard_functions.len(), 4);
+
+    fixture.cleanup().await.expect("cleanup");
+}

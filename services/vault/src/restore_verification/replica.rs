@@ -125,6 +125,7 @@ const fn replica_failure(error: ReplicaError) -> VerificationFailure {
         ReplicaError::InvalidInput
         | ReplicaError::SourceIo
         | ReplicaError::Remote
+        | ReplicaError::RemoteStillPresent
         | ReplicaError::NotFound
         | ReplicaError::Timeout
         | ReplicaError::Cancelled => VerificationFailure::ReplicaUnavailable,

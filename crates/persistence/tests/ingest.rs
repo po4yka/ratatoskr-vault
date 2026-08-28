@@ -16,7 +16,10 @@ use ratatoskr_vault_core::error::VaultError;
 use ratatoskr_vault_persistence::test_support::TestDatabase;
 use uuid::Uuid;
 
+const TOMBSTONE_GRACE_SECONDS: i64 = 2_592_000;
+
 async fn test_database() -> TestDatabase {
+    let _subscriber = tracing_subscriber::fmt().with_test_writer().try_init();
     TestDatabase::create()
         .await
         .expect("a disposable database with the schema applied")
@@ -47,6 +50,48 @@ async fn revision_rows(fixture: &TestDatabase, target_id: Uuid, policy_revision:
     .fetch_one(fixture.pool())
     .await
     .expect("the revision count must run")
+}
+
+async fn seed_restorable_snapshot(fixture: &TestDatabase, target_id: Uuid) -> Uuid {
+    let mirror_id = Uuid::now_v7();
+    let run_id = Uuid::now_v7();
+    let snapshot_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into git_vault.mirrors
+             (mirror_id, target_id, status, storage_path, fsck_result, created_at, updated_at)
+         values ($1, $2, 'ready', $3, 'ok', now(), now())",
+    )
+    .bind(mirror_id)
+    .bind(target_id)
+    .bind(format!("mirrors/cd/{mirror_id}.git"))
+    .execute(fixture.pool())
+    .await
+    .expect("mirror fixture must insert");
+    sqlx::query(
+        "insert into git_vault.mirror_lifecycle_runs
+             (run_id, target_id, operation, outcome, created_at)
+         values ($1, $2, 'fetch', 'succeeded', now())",
+    )
+    .bind(run_id)
+    .bind(target_id)
+    .execute(fixture.pool())
+    .await
+    .expect("run fixture must insert");
+    sqlx::query(
+        "insert into git_vault.snapshots
+             (snapshot_id, target_id, mirror_id, mirror_lifecycle_run_id, format, status,
+              refs_hash, created_at)
+         values ($1, $2, $3, $4, 'git_bundle', 'restorable', $5, now())",
+    )
+    .bind(snapshot_id)
+    .bind(target_id)
+    .bind(mirror_id)
+    .bind(run_id)
+    .bind(vec![4_u8; 32])
+    .execute(fixture.pool())
+    .await
+    .expect("snapshot fixture must insert");
+    snapshot_id
 }
 
 /// A redelivered `(source, message_id)` pair is refused without side effects: the revision table
@@ -192,4 +237,172 @@ async fn conflicting_ingests_serialize_on_target_row() {
     assert_eq!(governed.policy_revision, 9);
 
     fixture.cleanup().await.expect("cleanup");
+}
+
+/// A governing inactive policy starts one fixed grace window, and a newer active policy cancels
+/// its still-pending deletion intent without removing snapshot evidence.
+#[tokio::test]
+async fn none_policy_tombstones_once_and_reactivation_cancels_before_deletion() {
+    use ratatoskr_vault_core::target_state::TargetStatus;
+
+    let fixture = test_database().await;
+    let target_id = fixture
+        .database
+        .ingest_delivery(
+            "github",
+            "ingest-tombstone",
+            "github-catalog",
+            Uuid::now_v7(),
+            &governing(1),
+        )
+        .await
+        .expect("active policy must enroll");
+    let snapshot_id = seed_restorable_snapshot(&fixture, target_id).await;
+    let mut inactive = governing(2);
+    inactive.preservation_level = "none".to_owned();
+    fixture
+        .database
+        .ingest_delivery(
+            "github",
+            "ingest-tombstone",
+            "github-catalog",
+            Uuid::now_v7(),
+            &inactive,
+        )
+        .await
+        .expect("inactive revision must persist");
+    fixture
+        .database
+        .apply_transition(target_id, TargetStatus::Excluded, &inactive)
+        .await
+        .expect("inactive target must converge");
+    fixture
+        .database
+        .apply_transition(target_id, TargetStatus::Excluded, &inactive)
+        .await
+        .expect("reconvergence must reuse the tombstone");
+
+    let tombstone: Option<(Uuid, i64)> = sqlx::query_as(
+        "select tombstone_id,
+                extract(epoch from not_before - recorded_at)::bigint
+         from git_vault.tombstones
+         where target_id = $1 and cancelled_at is null and completed_at is null",
+    )
+    .bind(target_id)
+    .fetch_optional(fixture.pool())
+    .await
+    .expect("active tombstone must query");
+    assert_eq!(
+        tombstone.map(|(_, grace_seconds)| grace_seconds),
+        Some(TOMBSTONE_GRACE_SECONDS)
+    );
+    let Some((tombstone_id, _grace_seconds)) = tombstone else {
+        fixture.cleanup().await.expect("cleanup");
+        return;
+    };
+    assert_eq!(active_tombstone_count(&fixture, target_id).await, 1);
+
+    seed_pending_plan(&fixture, target_id, snapshot_id, tombstone_id).await;
+
+    let reactivated = governing(3);
+    fixture
+        .database
+        .ingest_delivery(
+            "github",
+            "ingest-tombstone",
+            "github-catalog",
+            Uuid::now_v7(),
+            &reactivated,
+        )
+        .await
+        .expect("reactivated revision must persist");
+    fixture
+        .database
+        .apply_transition(target_id, TargetStatus::Requested, &reactivated)
+        .await
+        .expect("reactivation before effects must converge");
+
+    let (status, cancelled_tombstones, cancelled_plans, snapshots): (String, i64, i64, i64) =
+        sqlx::query_as(
+            "select targets.status,
+                    (select count(*) from git_vault.tombstones
+                     where target_id = $1 and cancelled_at is not null),
+                    (select count(*) from git_vault.deletion_plans
+                     where target_id = $1 and status = 'cancelled'),
+                    (select count(*) from git_vault.snapshots where snapshot_id = $2)
+             from git_vault.targets where target_id = $1",
+        )
+        .bind(target_id)
+        .bind(snapshot_id)
+        .fetch_one(fixture.pool())
+        .await
+        .expect("reactivated state must query");
+    assert_eq!(status, "requested");
+    assert_eq!(cancelled_tombstones, 1);
+    assert_eq!(cancelled_plans, 1);
+    assert_eq!(snapshots, 1);
+
+    fixture.cleanup().await.expect("cleanup");
+}
+
+async fn seed_pending_plan(
+    fixture: &TestDatabase,
+    target_id: Uuid,
+    snapshot_id: Uuid,
+    tombstone_id: Uuid,
+) {
+    let policy_id = Uuid::now_v7();
+    let evaluation_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into git_vault.retention_policies
+             (policy_id, name, minimum_age_seconds, grace_seconds,
+              keep_last_restorable, created_at)
+         values ($1, $2, 86400, $3, 1, now())",
+    )
+    .bind(policy_id)
+    .bind(format!("withdrawal-{target_id}"))
+    .bind(TOMBSTONE_GRACE_SECONDS)
+    .execute(fixture.pool())
+    .await
+    .expect("retention policy must insert");
+    sqlx::query(
+        "insert into git_vault.retention_evaluations
+             (evaluation_id, target_id, policy_id, mode, policy_snapshot, outcome,
+              correlation_id, evaluated_at)
+         values ($1, $2, $3, 'scheduled', '{}'::jsonb, 'selected', $4, now())",
+    )
+    .bind(evaluation_id)
+    .bind(target_id)
+    .bind(policy_id)
+    .bind(Uuid::now_v7())
+    .execute(fixture.pool())
+    .await
+    .expect("evaluation must insert");
+    sqlx::query(
+        "insert into git_vault.deletion_plans
+             (plan_id, evaluation_id, target_id, snapshot_id, tombstone_id, reason,
+              automatic, tombstoned_at, not_before, estimated_bytes, correlation_id)
+         select $1, $2, $3, $4, tombstone_id, 'target_inactive', true,
+                recorded_at, not_before, 1024, correlation_id
+         from git_vault.tombstones where tombstone_id = $5",
+    )
+    .bind(Uuid::now_v7())
+    .bind(evaluation_id)
+    .bind(target_id)
+    .bind(snapshot_id)
+    .bind(tombstone_id)
+    .execute(fixture.pool())
+    .await
+    .expect("pending plan must insert");
+}
+
+async fn active_tombstone_count(fixture: &TestDatabase, target_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from git_vault.tombstones
+         where target_id = $1 and cancelled_at is null and completed_at is null",
+    )
+    .bind(target_id)
+    .fetch_one(fixture.pool())
+    .await
+    .expect("tombstone count must query")
 }

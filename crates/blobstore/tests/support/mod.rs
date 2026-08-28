@@ -18,6 +18,7 @@ struct FixtureState {
     uploads: Mutex<BTreeMap<String, FixtureUpload>>,
     requests: Mutex<Vec<String>>,
     corrupt_gets: AtomicBool,
+    retain_deletes: AtomicBool,
     sequence: AtomicU64,
 }
 
@@ -78,6 +79,11 @@ impl S3Fixture {
     pub(crate) fn corrupt_next_get(&self) {
         self.state.corrupt_gets.store(true, Ordering::Release);
     }
+
+    /// Acknowledges the next object DELETE while deliberately retaining its bytes.
+    pub(crate) fn retain_next_delete(&self) {
+        self.state.retain_deletes.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for S3Fixture {
@@ -93,6 +99,9 @@ async fn handle(State(state): State<Arc<FixtureState>>, request: Request<Body>) 
         requests.push(format!("{} /{key}?{query}", request.method()));
     }
     match *request.method() {
+        Method::POST if query == "delete" || query.starts_with("delete=") => {
+            delete_objects(&state, request.into_body()).await
+        }
         Method::POST if query_value(&query, "uploads").is_some() => initiate_upload(&state, &key),
         Method::PUT if query_value(&query, "uploadId").is_some() => {
             upload_part(&state, key, query, request.into_body()).await
@@ -101,6 +110,15 @@ async fn handle(State(state): State<Arc<FixtureState>>, request: Request<Body>) 
             complete_upload(&state, &query)
         }
         Method::DELETE if query_value(&query, "uploadId").is_some() => abort_upload(&state, &query),
+        Method::DELETE => match state.objects.lock() {
+            Ok(mut objects) => {
+                if !state.retain_deletes.swap(false, Ordering::AcqRel) {
+                    objects.remove(&key);
+                }
+                response(StatusCode::NO_CONTENT, Body::empty())
+            }
+            Err(_) => response(StatusCode::INTERNAL_SERVER_ERROR, Body::empty()),
+        },
         Method::PUT => {
             let Ok(body) = to_bytes(request.into_body(), 64 * 1024 * 1024).await else {
                 return response(StatusCode::BAD_REQUEST, Body::empty());
@@ -134,6 +152,37 @@ async fn handle(State(state): State<Arc<FixtureState>>, request: Request<Body>) 
             Err(_) => response(StatusCode::INTERNAL_SERVER_ERROR, Body::empty()),
         },
         _ => response(StatusCode::METHOD_NOT_ALLOWED, Body::empty()),
+    }
+}
+
+async fn delete_objects(state: &FixtureState, body: Body) -> Response<Body> {
+    let Ok(bytes) = to_bytes(body, 1024 * 1024).await else {
+        return response(StatusCode::BAD_REQUEST, Body::empty());
+    };
+    let Ok(xml) = std::str::from_utf8(&bytes) else {
+        return response(StatusCode::BAD_REQUEST, Body::empty());
+    };
+    let Some(key) = xml
+        .split_once("<Key>")
+        .and_then(|(_, remainder)| remainder.split_once("</Key>"))
+        .map(|(key, _)| key)
+    else {
+        return response(StatusCode::BAD_REQUEST, Body::empty());
+    };
+    match state.objects.lock() {
+        Ok(mut objects) => {
+            if !state.retain_deletes.swap(false, Ordering::AcqRel) {
+                objects.remove(key);
+                objects.remove(&format!("vault-fixtures/{key}"));
+            }
+            xml_response(
+                StatusCode::OK,
+                format!(
+                    "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Deleted><Key>{key}</Key></Deleted></DeleteResult>"
+                ),
+            )
+        }
+        Err(_) => response(StatusCode::INTERNAL_SERVER_ERROR, Body::empty()),
     }
 }
 

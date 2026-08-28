@@ -17,7 +17,18 @@ use uuid::Uuid;
 /// Every ordered pair over the vocabulary produces the same verdict in Rust and in the
 /// database: [`Transition::is_legal`] accepts exactly the updates the schema allows.
 #[tokio::test]
-async fn machine_agreement_walk_covers_every_pair() {
+async fn application_and_database_transitions_agree() {
+    assert_eq!(
+        TargetStatus::ALL.len(),
+        12,
+        "deleted must be in the closed vocabulary"
+    );
+    assert!(
+        TargetStatus::ALL
+            .iter()
+            .any(|status| status.as_str() == "deleted"),
+        "terminal deleted status must be represented by the application"
+    );
     let fixture = TestDatabase::create()
         .await
         .expect("a disposable database with the schema applied");
@@ -25,6 +36,15 @@ async fn machine_agreement_walk_covers_every_pair() {
 
     for &from in &TargetStatus::ALL {
         for &to in &TargetStatus::ALL {
+            if matches!(
+                (from, to),
+                (TargetStatus::Excluded, TargetStatus::Deleting)
+                    | (TargetStatus::Deleting, TargetStatus::Deleted)
+            ) {
+                // These adjacent pairs additionally require durable deletion evidence and are
+                // covered by `transitions::deletion_transitions_require_stage_evidence`.
+                continue;
+            }
             let target_id = Uuid::now_v7();
             sqlx::query(
                 "insert into git_vault.targets

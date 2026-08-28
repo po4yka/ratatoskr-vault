@@ -111,8 +111,13 @@ impl Database {
              left join git_vault.replica_placements placements
                on placements.artifact_id = artifacts.artifact_id
               and placements.replica_target_id = replica_targets.replica_target_id
-             where placements.placement_id is null
-                or placements.last_verified_at < to_timestamp($2)
+             where (placements.placement_id is null
+                or placements.last_verified_at < to_timestamp($2))
+               and not exists (
+                 select 1 from git_vault.deletion_plans deletion_plan
+                 where deletion_plan.snapshot_id = artifacts.snapshot_id
+                   and deletion_plan.status in ('local_deleting', 'replica_deleting')
+             )
              order by placements.last_verified_at asc nulls first,
                       snapshots.created_at, artifacts.artifact_id
              limit $3",
@@ -227,16 +232,48 @@ impl Database {
         .await
         .map_err(storage_failure)?;
         let inserted: Option<Uuid> = sqlx::query_scalar(
-            "insert into git_vault.replication_attempts
+            "with identity_lock as (
+                 select pg_advisory_xact_lock(hashtextextended(concat(
+                     'replica_key:', replica_targets.replica_target_id::text, ':',
+                     case when replica_targets.key_prefix = '' then ''
+                          else replica_targets.key_prefix || '/' end,
+                     'sha256/', substr(encode(snapshot_artifacts.sha256_hash, 'hex'), 1, 2),
+                     '/', encode(snapshot_artifacts.sha256_hash, 'hex')
+                 ), 0))
+                 from git_vault.snapshot_artifacts
+                 cross join git_vault.replica_targets
+                 where snapshot_artifacts.artifact_id = $2
+                   and replica_targets.replica_target_id = $3
+             )
+             insert into git_vault.replication_attempts
                  (attempt_id, artifact_id, replica_target_id, outcome, lease_owner,
                   lease_expires_at, started_at)
              select $1, snapshot_artifacts.artifact_id, replica_targets.replica_target_id,
                     'running', $4, now() + ($5 * interval '1 second'), now()
              from git_vault.snapshot_artifacts
              cross join git_vault.replica_targets
+             cross join identity_lock
              where snapshot_artifacts.artifact_id = $2
                and replica_targets.replica_target_id = $3
                and replica_targets.enabled
+               and not exists (
+                   select 1 from git_vault.deletion_plans deletion_plan
+                   where deletion_plan.snapshot_id = snapshot_artifacts.snapshot_id
+                     and deletion_plan.status in ('local_deleting', 'replica_deleting')
+               )
+               and not exists (
+                   select 1 from git_vault.physical_object_claims physical_claim
+                   where physical_claim.identity_kind = 'replica_key'
+                     and physical_claim.identity_key = concat(
+                         replica_targets.replica_target_id::text, ':',
+                         case when replica_targets.key_prefix = '' then ''
+                              else replica_targets.key_prefix || '/' end,
+                         'sha256/', substr(encode(snapshot_artifacts.sha256_hash, 'hex'), 1, 2),
+                         '/', encode(snapshot_artifacts.sha256_hash, 'hex')
+                     )
+                     and physical_claim.outcome = 'running'
+                     and physical_claim.lease_expires_at > clock_timestamp()
+               )
              on conflict do nothing
              returning attempt_id",
         )

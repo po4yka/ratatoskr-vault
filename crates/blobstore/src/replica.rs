@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 const OWNER: &str = "ratatoskr-vault";
 const MULTIPART_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const ABSENCE_CHECK_ATTEMPTS: usize = 3;
 
 /// A verified remote object placement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,15 @@ pub struct ReplicaPlacement {
     pub size_bytes: u64,
     /// Re-verified remote digest.
     pub sha256: String,
+}
+
+/// Verified terminal result of one exact persisted-key replica deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaDeleteOutcome {
+    /// The object existed, DELETE was acknowledged, and a following read proved absence.
+    Deleted,
+    /// The exact persisted key was already absent.
+    AlreadyAbsent,
 }
 
 /// Closed replica transfer failures; provider text and credentials are never retained.
@@ -60,6 +70,9 @@ pub enum ReplicaError {
     /// The remote body exceeded the immutable expected length or configured ceiling.
     #[error("remote replica body is oversized")]
     RemoteOversized,
+    /// DELETE was acknowledged but the exact object remained readable.
+    #[error("remote replica object remains after deletion")]
+    RemoteStillPresent,
     /// The source or response exceeded the finite configured ceiling.
     #[error("replica bytes exceed the configured size limit")]
     SizeLimitExceeded,
@@ -79,6 +92,12 @@ pub struct ReplicaStore {
 }
 
 impl ReplicaStore {
+    /// Stable configured target name used to validate persisted placements.
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
     /// Builds an S3 client from the supplied target only. This deliberately never calls
     /// `AmazonS3Builder::from_env`, so credential profiles and metadata services are not consulted.
     ///
@@ -139,6 +158,67 @@ impl ReplicaStore {
         )
         .await
         .map_err(|_| ReplicaError::Timeout)?
+    }
+
+    /// Deletes one exact persisted placement and verifies remote absence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed failure when identity validation or remote absence proof fails.
+    pub async fn delete_verified(
+        &self,
+        reference: &BlobRef,
+        placement: &ReplicaPlacement,
+    ) -> Result<ReplicaDeleteOutcome, ReplicaError> {
+        validate_reference(reference, self.max_object_bytes)?;
+        let expected_key = object_key(&self.key_prefix, reference)?;
+        if placement.target != self.target
+            || placement.object_key != expected_key
+            || placement.sha256 != reference.sha256
+            || placement.size_bytes != reference.size_bytes
+        {
+            return Err(ReplicaError::InvalidInput);
+        }
+        let location =
+            ObjectPath::parse(&placement.object_key).map_err(|_| ReplicaError::InvalidInput)?;
+        tokio::time::timeout(
+            self.request_timeout,
+            self.delete_verified_inner(reference, &location),
+        )
+        .await
+        .map_err(|_| ReplicaError::Timeout)?
+    }
+
+    async fn delete_verified_inner(
+        &self,
+        reference: &BlobRef,
+        location: &ObjectPath,
+    ) -> Result<ReplicaDeleteOutcome, ReplicaError> {
+        match self.verify_remote(reference, location).await {
+            Ok(()) => {}
+            Err(ReplicaError::NotFound) => return Ok(ReplicaDeleteOutcome::AlreadyAbsent),
+            Err(error) => return Err(error),
+        }
+        self.store
+            .delete(location)
+            .await
+            .map_err(|_| ReplicaError::Remote)?;
+        for attempt in 0..ABSENCE_CHECK_ATTEMPTS {
+            match self.verify_remote(reference, location).await {
+                Err(ReplicaError::NotFound) => return Ok(ReplicaDeleteOutcome::Deleted),
+                Ok(())
+                | Err(
+                    ReplicaError::RemoteChecksumMismatch
+                    | ReplicaError::RemoteTruncated
+                    | ReplicaError::RemoteOversized,
+                ) => {}
+                Err(error) => return Err(error),
+            }
+            if attempt + 1 < ABSENCE_CHECK_ATTEMPTS {
+                tokio::task::yield_now().await;
+            }
+        }
+        Err(ReplicaError::RemoteStillPresent)
     }
 
     /// Uploads with a cooperative shutdown signal, explicitly aborting an owned multipart upload

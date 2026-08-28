@@ -17,6 +17,8 @@ mod lfs_collection;
 mod mirror_lifecycle;
 mod replication;
 mod restore_verification;
+mod retention;
+mod retention_execution;
 mod snapshot;
 mod wiki;
 
@@ -38,6 +40,16 @@ pub use crate::replication::{
 pub use crate::restore_verification::{
     EvidenceOutcome, StoredRestoreDrillReport, StoredRestoreSource, StoredVerificationReport,
     VerificationScheduleRecord,
+};
+pub use crate::retention::{
+    DeletionPlanOutcome, DeletionPlanRequest, DeletionStageKind, RetentionAuditCursor,
+    RetentionAuditRecord, RetentionCandidateClassification, RetentionCandidateEvidence,
+    RetentionEvaluationMode, RetentionEvaluationOutcome, RetentionEvaluationRequest,
+    StageClaimOutcome, StageClaimRequest,
+};
+pub use crate::retention_execution::{
+    DeletionExecutionArtifact, DeletionExecutionPlan, DeletionExecutionReplica,
+    DeletionStageFailureClass,
 };
 pub use crate::snapshot::{SnapshotParent, SnapshotSource};
 pub use crate::wiki::{WikiDiscovery, WikiDiscoveryRecord};
@@ -218,16 +230,27 @@ impl Database {
         .await
         .map_err(|err| classify_status_update_failure(&err))?;
 
-        let current: Option<String> = sqlx::query_scalar(
-            "select status from git_vault.targets where target_id = $1 for update",
+        let current: Option<(String, bool)> = sqlx::query_as(
+            "select status, pinned from git_vault.targets where target_id = $1 for update",
         )
         .bind(target_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|err| classify_status_update_failure(&err))?;
-        let Some(from_status) = current else {
+        let Some((from_status, target_pinned)) = current else {
             return Err(VaultError::InvalidDelivery { field: "target_id" });
         };
+
+        retention::apply_target_retention_transition(
+            &mut tx,
+            target_id,
+            target_pinned,
+            to_status,
+            governing,
+            policy_revision,
+            correlation_id,
+        )
+        .await?;
 
         sqlx::query(
             "update git_vault.targets set status = $2, updated_at = now() where target_id = $1",

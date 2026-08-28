@@ -297,11 +297,21 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let artifact_id = Uuid::now_v7();
-    sqlx::query(
-        "insert into git_vault.snapshot_artifacts
+    let inserted = sqlx::query(
+        "with identity_lock as (
+             select pg_advisory_xact_lock(hashtextextended(
+                 concat('local_digest:', encode($4, 'hex')), 0))
+         )
+         insert into git_vault.snapshot_artifacts
              (artifact_id, snapshot_id, kind, sha256_hash, blob_owner, digest_algorithm,
               media_type, size_bytes, created_at)
-         values ($1, $2, $3, $4, $5, 'sha256', $6, $7, now())",
+         select $1, $2, $3, $4, $5, 'sha256', $6, $7, now()
+         from identity_lock
+         where not exists (
+             select 1 from git_vault.physical_object_claims
+             where identity_kind = 'local_digest' and identity_key = encode($4, 'hex')
+               and outcome = 'running' and lease_expires_at > clock_timestamp()
+         )",
     )
     .bind(artifact_id)
     .bind(snapshot_id)
@@ -313,7 +323,11 @@ where
     .execute(executor)
     .await
     .map_err(storage_failure)?;
-    Ok(artifact_id)
+    if inserted.rows_affected() == 1 {
+        Ok(artifact_id)
+    } else {
+        Err(VaultError::StorageFailed)
+    }
 }
 
 fn validate_blob_ref(reference: &BlobRef) -> Result<(), VaultError> {

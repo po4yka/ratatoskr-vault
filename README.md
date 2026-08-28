@@ -214,7 +214,8 @@ credentials, path-style content-derived keys, bounded multipart PUT, and full GE
 verification. Required replica convergence is tracked separately from immutable local verification;
 an outage degrades off-host health without blocking local snapshot, verification, or restore work.
 The worker bounds admitted items, aggregate bytes, concurrency, request time, and recoverable leases.
-Vault does not delete remote objects or configure bucket lifecycle rules in this item.
+Vault can delete an exact persisted replica key only through an authorized retention plan and
+proves absence after DELETE. It still does not configure bucket lifecycle rules.
 
 Future adapters may include immutable or WORM storage. Every backend reports integrity, capacity, latency, and reachability separately.
 
@@ -226,23 +227,43 @@ An upstream unstar does not automatically destroy a backup.
 unstar observed
   -> desired policy reevaluated
   -> target becomes inactive when appropriate
-  -> grace period
-  -> tombstone/excluded state
+  -> tombstone/excluded state with a fixed grace deadline
   -> verified snapshots retained
-  -> physical deletion only by explicit retention policy
+  -> local deletion and absence proof
+  -> confined mirror deletion and absence proof for tombstoned targets
+  -> per-replica deletion and absence proof
+  -> audit/manifests retained after bytes are gone
 ```
 
-`pinned=true` always overrides automatic release caused by star-state changes. This protects repositories that were explicitly tracked and later happened to be starred and unstarred.
+Target `pinned=true` blocks automatic withdrawal. Snapshot pins are durable, source-scoped
+`operator` or `user` records; either source exempts the snapshot from scheduled retention, quota
+pressure, tombstoned deletion, and stage claims until that exact pin is revoked.
+
+The default local policy keeps the newest three restorable snapshots per mirror, applies a 30-day
+minimum-age floor, and gives every deletion intent a fixed 30-day grace window. Persisted policy
+bounds are keep-N `1..=1,000,000`, age `0..=315,360,000` seconds, and grace
+`1..=315,360,000` seconds. UUID tie-breakers make equal-timestamp selection deterministic, and the
+last restorable snapshot is never routine cleanup. Quota pressure consumes only already
+grace-complete plans: ordinary eligible snapshots first, then inactive-target snapshots; if those
+bytes are insufficient, allocation is refused. It never overrides pins, age/keep floors, or grace.
 
 Physical deletion is multi-stage:
 
-1. mark deletion intent;
-2. verify policy and grace period;
-3. remove references from active rotation;
-4. safely remove confined local paths;
-5. expire off-host objects according to policy;
-6. retain an audit tombstone;
-7. verify that no required snapshot was unintentionally removed.
+1. append the evaluation, candidate reason, tombstoned intent, and immutable `not_before`;
+2. recheck database time, governing policy, pins, and shared physical references at claim time;
+3. delete each unshared digest-derived local regular file and verify absence;
+4. for tombstoned targets, delete the confined persisted mirror directory and verify absence;
+5. only after local and required mirror evidence is terminal, delete each exact persisted replica
+   key and verify absence;
+6. retain snapshot/manifests, tombstone, plan, attempts, failures, and audit projections;
+7. mark snapshot and, when all target work completed, target `deleted`.
+
+To halt deletion, stop the retention worker/admission path; owned leases expire and are journaled
+as abandoned before recovery. A newer active policy may cancel a tombstone only before any physical
+stage starts. Rollback cannot recreate bytes already verified absent: recover them from another
+retained/shared snapshot or independently verified replica, record the new evidence, then resume.
+This feature adds database evidence and reclaims artifact bytes; it introduces no credential type
+or secret persistence and reuses the existing narrowly scoped replica credentials.
 
 ## Restore drills
 
@@ -327,9 +348,9 @@ vault_build_info
 vault_readiness
 ```
 
-Replication and LFS/wiki collector telemetry uses only internal target ids plus closed
-collector/outcome/failure labels; repository names, remote URLs, and credentials are never metric
-labels. Retention metrics remain planned with that capability.
+Replication, LFS/wiki collector, and retention telemetry uses only internal target ids plus closed
+collector/decision/stage/outcome/failure labels; repository names, digests, replica keys, remote
+URLs, and credentials are never metric labels.
 
 Future target, operation, attempt, command, storage, and result spans will include their identifiers
 and classifications, but never embedded credentials. The implemented foundation currently records
@@ -368,12 +389,13 @@ service is unavailable.
 
 ## Project status
 
-Implemented so far: items 1–8, including explicitly enabled Git LFS object preservation in signed
+Implemented so far: items 1–9, including explicitly enabled Git LFS object preservation in signed
 manifests and restore drills, off-host LFS artifact inventory, and independently mirrored wiki
 sibling targets. Verification and replication scheduling are deterministic and budget-aware;
-terminal reports are append-only and alert-worthy failure facts enter the transactional outbox. The
+retention is deterministic, pin-aware, grace-bounded, local-first, and fully journaled. Terminal
+reports are append-only and alert-worthy failure facts enter the transactional outbox. The
 repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
 
-Not yet implemented: provider-API auxiliary collectors (none approved), retention and local/remote
-deletion (9), legacy adoption (10), provider bucket-policy/lifecycle automation, and the event-bus
+Not yet implemented: provider-API auxiliary collectors (none approved), legacy adoption (10),
+provider bucket-policy/lifecycle automation, and the event-bus
 publisher/consumer that will deliver persisted outbox facts. No code claims those capabilities.

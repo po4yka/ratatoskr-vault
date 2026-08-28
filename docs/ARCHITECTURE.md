@@ -3,8 +3,8 @@
 > Status: target architecture. The Rust service foundation, operator health plane, current
 > `git_vault` schema, CI gate, reconciliation, confined Git execution, and local mirror lifecycle
 > are implemented. Local immutable bundle snapshots, signed manifests, verification, restore
-> drills, and verified S3-compatible off-host replicas are implemented; retention, remote deletion,
-> and the remaining sections are planned.
+> drills, verified S3-compatible off-host replicas, retention, tombstones, and staged deletion are
+> implemented; the remaining sections are planned.
 
 ## 1. Purpose
 
@@ -517,6 +517,12 @@ The optional `restore-verifier` tool can run without the main Vault service, usi
 - successful replacement snapshot;
 - last restore verification.
 
+The implemented default keeps three newest restorable snapshots per mirror, protects snapshots
+younger than 30 days, and fixes a 30-day grace deadline when a deletion plan is created. Selection
+orders equal timestamps by snapshot UUID. Active `operator` and `user` snapshot pins take
+precedence over every automatic mode. Under quota pressure, Vault considers only grace-complete
+plans: ordinary policy-due snapshots, then inactive-target snapshots, otherwise allocation refusal.
+
 ### 15.2. Unstar flow
 
 ```text
@@ -538,12 +544,22 @@ Deletion is multi-stage:
 1. Verify current desired-state revision and no pin/hold.
 2. Create deletion plan with affected artifacts.
 3. Mark target `deleting` and publish audit event.
-4. Delete remote/local objects in controlled order.
-5. Verify absence where supported.
-6. Retain tombstone and manifest metadata.
-7. Mark target `deleted`.
+4. Delete unshared local digest-derived regular files and verify absence.
+5. For a tombstoned target, delete its confined persisted mirror directory and verify absence.
+6. After every local and required mirror stage is terminal, delete each unshared exact replica key
+   and verify absence.
+7. Retain tombstone and manifest metadata.
+8. Mark target `deleted`.
 
 Retries are idempotent. Partial deletion is visible and recoverable.
+
+Every evaluation and candidate reason, pin mutation, tombstone, early refusal, claim, abandonment,
+shared-reference suppression, external outcome, and completion is append-only and queryable by
+target or snapshot. Physical claims serialize deletion against snapshot publication and
+replication. Stopping the worker halts new effects; expired leases are abandoned and reconciled by
+exact-identity absence checks. Reactivation is permitted only before effects. Verified deletion is
+irreversible and must be recovered from another retained/replica artifact, never by rewriting
+metadata.
 
 ## 16. Credentials and remote access
 

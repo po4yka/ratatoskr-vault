@@ -32,11 +32,13 @@ pub enum TargetStatus {
     Excluded,
     /// Retention decided deletion and the staged deletion workflow owns the target.
     Deleting,
+    /// Every authorized local and replica deletion stage completed; evidence remains queryable.
+    Deleted,
 }
 
 impl TargetStatus {
     /// Every status of the closed vocabulary, in canonical order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Requested,
         Self::Cloning,
         Self::Ready,
@@ -48,6 +50,7 @@ impl TargetStatus {
         Self::Paused,
         Self::Excluded,
         Self::Deleting,
+        Self::Deleted,
     ];
 
     /// The canonical `snake_case` name of this status as persisted in the schema.
@@ -65,6 +68,7 @@ impl TargetStatus {
             Self::Paused => "paused",
             Self::Excluded => "excluded",
             Self::Deleting => "deleting",
+            Self::Deleted => "deleted",
         }
     }
 }
@@ -82,46 +86,38 @@ pub struct Transition {
 
 impl Transition {
     /// Every legal move of the design matrix, as `(from, to)` pairs.
-    const TRANSITIONS: [(TargetStatus, TargetStatus); 39] = [
+    const TRANSITIONS: [(TargetStatus, TargetStatus); 31] = [
         (TargetStatus::Requested, TargetStatus::Cloning),
         (TargetStatus::Requested, TargetStatus::Excluded),
-        (TargetStatus::Requested, TargetStatus::Deleting),
         (TargetStatus::Cloning, TargetStatus::Ready),
         (TargetStatus::Cloning, TargetStatus::Degraded),
         (TargetStatus::Cloning, TargetStatus::Excluded),
-        (TargetStatus::Cloning, TargetStatus::Deleting),
         (TargetStatus::Ready, TargetStatus::Fetching),
         (TargetStatus::Ready, TargetStatus::Degraded),
         (TargetStatus::Ready, TargetStatus::Paused),
         (TargetStatus::Ready, TargetStatus::Excluded),
-        (TargetStatus::Ready, TargetStatus::Deleting),
         (TargetStatus::Fetching, TargetStatus::Snapshotting),
         (TargetStatus::Fetching, TargetStatus::Ready),
         (TargetStatus::Fetching, TargetStatus::Degraded),
         (TargetStatus::Fetching, TargetStatus::Paused),
         (TargetStatus::Fetching, TargetStatus::Excluded),
-        (TargetStatus::Fetching, TargetStatus::Deleting),
         (TargetStatus::Snapshotting, TargetStatus::Verifying),
         (TargetStatus::Snapshotting, TargetStatus::Degraded),
-        (TargetStatus::Snapshotting, TargetStatus::Deleting),
         (TargetStatus::Verifying, TargetStatus::Healthy),
         (TargetStatus::Verifying, TargetStatus::Degraded),
-        (TargetStatus::Verifying, TargetStatus::Deleting),
         (TargetStatus::Healthy, TargetStatus::Fetching),
         (TargetStatus::Healthy, TargetStatus::Degraded),
         (TargetStatus::Healthy, TargetStatus::Paused),
         (TargetStatus::Healthy, TargetStatus::Excluded),
-        (TargetStatus::Healthy, TargetStatus::Deleting),
         (TargetStatus::Degraded, TargetStatus::Fetching),
         (TargetStatus::Degraded, TargetStatus::Cloning),
         (TargetStatus::Degraded, TargetStatus::Paused),
         (TargetStatus::Degraded, TargetStatus::Excluded),
-        (TargetStatus::Degraded, TargetStatus::Deleting),
         (TargetStatus::Paused, TargetStatus::Ready),
         (TargetStatus::Paused, TargetStatus::Excluded),
-        (TargetStatus::Paused, TargetStatus::Deleting),
         (TargetStatus::Excluded, TargetStatus::Requested),
         (TargetStatus::Excluded, TargetStatus::Deleting),
+        (TargetStatus::Deleting, TargetStatus::Deleted),
     ];
 
     /// Whether the state machine allows a direct move from one status to another.
@@ -140,7 +136,7 @@ mod tests {
     use super::{TargetStatus, Transition};
 
     #[test]
-    fn status_vocabulary_is_the_closed_set_of_eleven_states() {
+    fn status_vocabulary_is_the_closed_set_of_twelve_states() {
         let expected = [
             "requested",
             "cloning",
@@ -153,6 +149,7 @@ mod tests {
             "paused",
             "excluded",
             "deleting",
+            "deleted",
         ];
         let actual: Vec<&str> = TargetStatus::ALL
             .iter()
@@ -166,45 +163,37 @@ mod tests {
         let legal_pairs = [
             (TargetStatus::Requested, TargetStatus::Cloning),
             (TargetStatus::Requested, TargetStatus::Excluded),
-            (TargetStatus::Requested, TargetStatus::Deleting),
             (TargetStatus::Cloning, TargetStatus::Ready),
             (TargetStatus::Cloning, TargetStatus::Degraded),
             (TargetStatus::Cloning, TargetStatus::Excluded),
-            (TargetStatus::Cloning, TargetStatus::Deleting),
             (TargetStatus::Ready, TargetStatus::Fetching),
             (TargetStatus::Ready, TargetStatus::Degraded),
             (TargetStatus::Ready, TargetStatus::Paused),
             (TargetStatus::Ready, TargetStatus::Excluded),
-            (TargetStatus::Ready, TargetStatus::Deleting),
             (TargetStatus::Fetching, TargetStatus::Snapshotting),
             (TargetStatus::Fetching, TargetStatus::Ready),
             (TargetStatus::Fetching, TargetStatus::Degraded),
             (TargetStatus::Fetching, TargetStatus::Paused),
             (TargetStatus::Fetching, TargetStatus::Excluded),
-            (TargetStatus::Fetching, TargetStatus::Deleting),
             (TargetStatus::Snapshotting, TargetStatus::Verifying),
             (TargetStatus::Snapshotting, TargetStatus::Degraded),
-            (TargetStatus::Snapshotting, TargetStatus::Deleting),
             (TargetStatus::Verifying, TargetStatus::Healthy),
             (TargetStatus::Verifying, TargetStatus::Degraded),
-            (TargetStatus::Verifying, TargetStatus::Deleting),
             (TargetStatus::Healthy, TargetStatus::Fetching),
             (TargetStatus::Healthy, TargetStatus::Degraded),
             (TargetStatus::Healthy, TargetStatus::Paused),
             (TargetStatus::Healthy, TargetStatus::Excluded),
-            (TargetStatus::Healthy, TargetStatus::Deleting),
             (TargetStatus::Degraded, TargetStatus::Fetching),
             (TargetStatus::Degraded, TargetStatus::Cloning),
             (TargetStatus::Degraded, TargetStatus::Paused),
             (TargetStatus::Degraded, TargetStatus::Excluded),
-            (TargetStatus::Degraded, TargetStatus::Deleting),
             (TargetStatus::Paused, TargetStatus::Ready),
             (TargetStatus::Paused, TargetStatus::Excluded),
-            (TargetStatus::Paused, TargetStatus::Deleting),
             (TargetStatus::Excluded, TargetStatus::Requested),
             (TargetStatus::Excluded, TargetStatus::Deleting),
+            (TargetStatus::Deleting, TargetStatus::Deleted),
         ];
-        assert_eq!(legal_pairs.len(), 39);
+        assert_eq!(legal_pairs.len(), 31);
 
         let all_ordered_pairs: Vec<_> = TargetStatus::ALL
             .iter()

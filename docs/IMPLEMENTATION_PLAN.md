@@ -9,7 +9,7 @@
 7. Add off-host S3-compatible replicas and verification. *(implemented)*
 8. Add Git LFS, wiki, then separately approved auxiliary collectors. *(implemented: LFS and wiki;
    the approval gate exists and no provider-API auxiliary collector is approved or implemented)*
-9. Implement retention, pinning, tombstones, staged deletion, and audit.
+9. Implement retention, pinning, tombstones, staged deletion, and audit. *(implemented)*
 10. Adopt legacy mirrors, verify/re-snapshot, and cut over from legacy jobs.
 
 Definition of Done: one desired target is restored from an independently verified artifact; hostile

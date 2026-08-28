@@ -7,5 +7,6 @@ pub mod mirror_lifecycle;
 pub mod reconcile;
 pub mod replication;
 pub mod restore_verification;
+pub mod retention;
 pub mod snapshot_lifecycle;
 pub mod wiki;
