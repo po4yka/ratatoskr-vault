@@ -31,7 +31,6 @@ The gate is `.github/workflows/ci.yml`; this list and that job's `run:` steps ar
 
 ```bash
 cargo fetch --locked
-cargo deny check
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
@@ -39,9 +38,14 @@ cargo test --workspace --locked
 cargo build --workspace --locked --release
 ```
 
+`cargo deny check` is not in this list: it runs in its own `deny` job in ci.yml, separate from the
+gate, so a new RustSec advisory cannot hide a clippy or test failure behind it. It reads RustSec
+advisories, licences, duplicate versions and the source policy (`deny.toml`). Install once with
+`cargo install cargo-deny` and run it locally before declaring any change done, same as the list
+above.
+
 Notes on individual steps:
 
-- `cargo deny check` reads RustSec advisories, licences, duplicate versions and the source policy (`deny.toml`). Install once with `cargo install cargo-deny`.
 - `cargo clippy` carries the size limits from `clippy.toml`: functions at most 100 code lines, signatures at most 7 arguments, blocks at most 5 deep. An exception is `#[expect(clippy::too_many_lines, reason = "...")]` at the site, never a raised number.
 - The file-length limit (850 tracked `.rs` lines) runs as the awk step between clippy and build in ci.yml; it has no local equivalent because it reads `git ls-files`.
 - The tests need the database above; they fail loudly when it is unreachable rather than skipping.
