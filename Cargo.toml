@@ -53,7 +53,7 @@ object_store = { version = "=0.14.1", default-features = false, features = ["aws
 # Feature-unification selector for object_store's reqwest transport. It reuses the workspace's
 # existing rustls/ring provider and avoids OpenSSL and aws-lc-sys native build dependencies.
 reqwest = { version = "=0.13.1", default-features = false, features = ["rustls-no-provider"] }
-rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "=0.3.34"
 
 # ---- configuration ----
