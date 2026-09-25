@@ -120,7 +120,7 @@ fn delete_verified_blob_is_confined_idempotent_and_absent() {
 
 fn temporary_root() -> PathBuf {
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
-    let nonce = std::time::SystemTime::now()
+    let nonce = std::time::SystemTime::now() // wall-clock: opaque uniqueness for a temp dir name, never asserted
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock must be after Unix epoch")
         .as_nanos();
