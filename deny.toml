@@ -41,6 +41,8 @@ deny = [
 unknown-registry = "deny"
 unknown-git      = "deny"
 # The rule Cargo.toml states in prose, now with an exit code behind it: a git dependency must pin a
-# full commit SHA, never a branch or a tag. There are no git sources in this graph yet; if one
-# arrives its host goes into `allow-git` with a comment saying why.
+# full commit SHA, never a branch or a tag.
 required-git-spec = "rev"
+# The fleet contracts repository is the only git source: the envelope and the backup-policy
+# documents Vault exchanges with GitHub (XR-021 CONTRACTS.md section S09).
+allow-git = ["https://github.com/po4yka/ratatoskr-contracts"]

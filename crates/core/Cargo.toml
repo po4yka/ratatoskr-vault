@@ -8,6 +8,9 @@ license.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+ratatoskr-backup-contracts.workspace = true
+ratatoskr-event-envelope.workspace   = true
+ratatoskr-identifiers.workspace      = true
 figment.workspace = true
 http.workspace    = true
 secrecy.workspace = true
