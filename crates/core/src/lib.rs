@@ -9,6 +9,7 @@ pub mod delivery;
 pub mod error;
 pub mod mirror;
 pub mod planner;
+pub mod policy_feed;
 pub mod retention;
 pub mod snapshot;
 pub mod target_state;

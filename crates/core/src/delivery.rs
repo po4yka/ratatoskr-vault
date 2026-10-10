@@ -1,11 +1,30 @@
 //! The desired-state delivery boundary: raw records enter, validated records leave.
 //!
-//! Vault defines its own input contract (design D1): the live publisher does not exist yet, and
-//! importing catalog types would couple this crate to star/list models the bounded-context rules
-//! forbid. Deliveries arrive shaped like messages, are validated once, and only the validated
-//! form may drive planning or persistence.
+//! Vault defines its own input contract (design D1): importing catalog types would couple this
+//! crate to star/list models the bounded-context rules forbid. Deliveries arrive shaped like
+//! messages, are validated once, and only the validated form may drive planning or persistence.
+//! The live producer is the policy lane: [`crate::policy_feed`] maps GitHub's desired backup
+//! policy document to these deliveries, and the service feeds them through the reconciliation
+//! cycle (XR-021 CONTRACTS.md section S09).
+
+use uuid::Uuid;
 
 use crate::error::VaultError;
+
+/// One delivered desired-state message, exactly as the transport handed it over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingDelivery {
+    /// The provider owning the repository (`github`).
+    pub provider: String,
+    /// The provider-side opaque repository id.
+    pub external_repository_id: String,
+    /// The dedup source label of the transport lane.
+    pub source: String,
+    /// The transport message id; the `(source, message_id)` pair dedups at the inbox.
+    pub message_id: Uuid,
+    /// The raw desired-state record, validated inside the cycle.
+    pub delivery: DesiredStateDelivery,
+}
 
 /// A desired-state record exactly as delivered, before any validation.
 #[derive(Debug, Clone, PartialEq, Eq)]

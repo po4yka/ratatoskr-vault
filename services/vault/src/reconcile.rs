@@ -1,32 +1,17 @@
 //! The reconciliation cycle: deliveries enter through a narrow source, are validated once,
 //! ingested, planned against observed state, and only executable work runs (designs D1, D5, D7).
 
-use ratatoskr_vault_core::delivery::{DesiredStateDelivery, ValidatedDelivery, validate_delivery};
+use ratatoskr_vault_core::delivery::{IncomingDelivery, ValidatedDelivery, validate_delivery};
 use ratatoskr_vault_core::error::VaultError;
 use ratatoskr_vault_core::planner::{PlanCounters, WorkItem, plan};
 use ratatoskr_vault_core::target_state::TargetStatus;
 use ratatoskr_vault_persistence::{Database, GoverningPolicy};
 use uuid::Uuid;
 
-/// One delivered desired-state message, exactly as the transport handed it over.
-#[derive(Debug, Clone)]
-pub struct IncomingDelivery {
-    /// The provider owning the repository (`github`).
-    pub provider: String,
-    /// The provider-side opaque repository id.
-    pub external_repository_id: String,
-    /// The dedup source label of the transport lane.
-    pub source: String,
-    /// The transport message id; the `(source, message_id)` pair dedups at the inbox.
-    pub message_id: Uuid,
-    /// The raw desired-state record, validated inside the cycle.
-    pub delivery: DesiredStateDelivery,
-}
-
 /// Where undelivered messages come from (design D1).
 ///
-/// The live publisher does not exist yet, so the cycle depends on this seam and fixtures
-/// implement it in tests; swapping the real publisher in later touches nothing else.
+/// The cycle depends on this seam: the policy lane hands it a `Vec` of the deliveries one policy
+/// command produced, and fixtures implement it in tests.
 pub trait DeliverySource {
     /// Hands over every message not delivered so far.
     fn fetch_undelivered(&mut self) -> Vec<IncomingDelivery>;

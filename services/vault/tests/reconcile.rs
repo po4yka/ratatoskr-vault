@@ -7,8 +7,8 @@
     reason = "assertions in a test binary"
 )]
 
-use ratatoskr_vault::reconcile::{DeliverySource, IncomingDelivery, run_cycle};
-use ratatoskr_vault_core::delivery::DesiredStateDelivery;
+use ratatoskr_vault::reconcile::{DeliverySource, run_cycle};
+use ratatoskr_vault_core::delivery::{DesiredStateDelivery, IncomingDelivery};
 use ratatoskr_vault_persistence::test_support::TestDatabase;
 use uuid::Uuid;
 
