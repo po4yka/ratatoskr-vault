@@ -412,3 +412,72 @@ fn replica_policy_rejects_missing_secrets_zero_budgets_and_plaintext_remote() {
         "replica credentials leaked into diagnostics: {rendered}"
     );
 }
+
+/// The bus section carries the broker URL and the nkey seed path, and the lane it feeds cannot
+/// finish its work without the database: a bus without one is refused at startup.
+#[test]
+fn bus_section_is_validated_and_needs_a_database() {
+    let database = (
+        "database.url",
+        "postgres://vault:vault@127.0.0.1:5432/vault".to_owned(),
+    );
+    let url = ("bus.url", "nats://127.0.0.1:4222".to_owned());
+    let seed = ("bus.nkey_seed_path", "/etc/ratatoskr/vault.nkey".to_owned());
+
+    let loaded = config_from(&[database.clone(), url.clone(), seed.clone()])
+        .expect("a bus with a database and an absolute seed path must load");
+    let bus = loaded.bus.expect("the bus section");
+    assert_eq!(bus.url, "nats://127.0.0.1:4222");
+    assert_eq!(
+        bus.nkey_seed_path.as_deref(),
+        Some(std::path::Path::new("/etc/ratatoskr/vault.nkey"))
+    );
+
+    let refusals: [(&str, Vec<(&str, String)>); 5] = [
+        ("RATATOSKR__BUS__URL", vec![url.clone(), seed.clone()]),
+        (
+            "RATATOSKR__BUS__URL",
+            vec![
+                database.clone(),
+                ("bus.url", "http://127.0.0.1:4222".to_owned()),
+            ],
+        ),
+        (
+            "RATATOSKR__BUS__URL",
+            vec![
+                database.clone(),
+                ("bus.url", "nats://vault:canary@127.0.0.1:4222".to_owned()),
+            ],
+        ),
+        (
+            "RATATOSKR__BUS__NKEY_SEED_PATH",
+            vec![
+                database.clone(),
+                url.clone(),
+                ("bus.nkey_seed_path", "relative/vault.nkey".to_owned()),
+            ],
+        ),
+        (
+            "RATATOSKR__BUS__NKEY_SEED_PATH",
+            vec![
+                database,
+                ("bus.url", "tls://broker.example:4222".to_owned()),
+            ],
+        ),
+    ];
+    for (variable, vars) in refusals {
+        let result = config_from(&vars);
+        let Err(error) = result else {
+            panic!("a configuration naming {variable} as the problem must be refused: {vars:?}");
+        };
+        let report = error.report();
+        assert!(
+            report.contains(variable),
+            "the report must name {variable}\n{report}"
+        );
+        assert!(
+            !report.contains("canary"),
+            "the report must not echo a credential\n{report}"
+        );
+    }
+}

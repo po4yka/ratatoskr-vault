@@ -25,9 +25,9 @@ use figment::Figment;
 use figment::providers::{Env, Serialized};
 
 pub use crate::config::model::{
-    AdminConfig, DEFAULT_ADMIN_PORT, DatabaseConfig, LfsConfig, LogFormat, MirrorLifecycleConfig,
-    OtlpConfig, ReplicaTargetConfig, ReplicasConfig, ShutdownConfig, TelemetryConfig, VaultConfig,
-    VerificationConfig,
+    AdminConfig, BusConfig, DEFAULT_ADMIN_PORT, DatabaseConfig, LfsConfig, LogFormat,
+    MirrorLifecycleConfig, OtlpConfig, ReplicaTargetConfig, ReplicasConfig, ShutdownConfig,
+    TelemetryConfig, VaultConfig, VerificationConfig,
 };
 pub use crate::config::validate::{SHUTDOWN_CEILING_SECONDS, Violation};
 

@@ -75,6 +75,61 @@ pub(crate) fn validate(config: &VaultConfig) -> Vec<Violation> {
     found.extend(lfs_violations(config));
     found.extend(verification_violations(config));
     found.extend(replica_violations(config));
+    found.extend(bus_violations(config));
+
+    found
+}
+
+/// V8 — the policy lane's bus. A bus URL names a credential-free `nats://` or `tls://` broker, the
+/// nkey seed is a file named by an absolute path (and mandatory over TLS), and the lane cannot do
+/// its work without the database it writes to, so a bus without one is refused at startup instead
+/// of reporting ready while it cannot finish a command.
+fn bus_violations(config: &VaultConfig) -> Vec<Violation> {
+    let mut found = Vec::new();
+    let Some(bus) = config.bus.as_ref() else {
+        return found;
+    };
+
+    let parsed = url::Url::parse(&bus.url).ok();
+    let broker_ok = parsed.as_ref().is_some_and(|url| {
+        matches!(url.scheme(), "nats" | "tls")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            // A bare `nats://host:port` has an empty path; `nats://host:port/` has `/`.
+            && matches!(url.path(), "" | "/")
+    });
+    if !broker_ok {
+        found.push(Violation {
+            key: "bus.url",
+            env_var: "RATATOSKR__BUS__URL",
+            rule: "must be a credential-free nats:// or tls:// broker URL without a path",
+        });
+    }
+    if config.database.is_none() {
+        found.push(Violation {
+            key: "bus.url",
+            env_var: "RATATOSKR__BUS__URL",
+            rule: "needs RATATOSKR__DATABASE__URL: the policy lane cannot finish a command without it",
+        });
+    }
+
+    let over_tls = parsed.as_ref().is_some_and(|url| url.scheme() == "tls");
+    match bus.nkey_seed_path.as_ref() {
+        Some(path) if !path.is_absolute() => found.push(Violation {
+            key: "bus.nkey_seed_path",
+            env_var: "RATATOSKR__BUS__NKEY_SEED_PATH",
+            rule: "must be the absolute path of the nkey seed file, e.g. /etc/ratatoskr/vault.nkey",
+        }),
+        None if over_tls => found.push(Violation {
+            key: "bus.nkey_seed_path",
+            env_var: "RATATOSKR__BUS__NKEY_SEED_PATH",
+            rule: "is required for a tls:// broker: the seed authenticates this identity",
+        }),
+        _ => {}
+    }
 
     found
 }

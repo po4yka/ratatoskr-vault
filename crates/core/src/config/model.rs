@@ -51,8 +51,25 @@ pub struct VaultConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<ReplicasConfig>,
 
+    /// The message bus the policy lane consumes from and publishes to. Optional: a process
+    /// without one serves its operator plane and runs no lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<BusConfig>,
+
     /// Logging, filtering and span export.
     pub telemetry: TelemetryConfig,
+}
+
+/// The NATS connection of the policy lane (`RATATOSKR__BUS__*`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusConfig {
+    /// The broker URL, `nats://host:port` or `tls://host:port`. Credentials never belong in it.
+    pub url: String,
+    /// Absolute path of the file holding the nkey seed. The seed is read at runtime and never
+    /// logged; the file is `/etc/ratatoskr/vault.nkey` on the deployment target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nkey_seed_path: Option<PathBuf>,
 }
 
 impl VaultConfig {
@@ -74,6 +91,7 @@ impl VaultConfig {
             lfs: None,
             verification: None,
             replicas: None,
+            bus: None,
             telemetry: TelemetryConfig {
                 log_format: LogFormat::default(),
                 log_filter: default_log_filter(),
