@@ -15,6 +15,8 @@ pub mod test_support;
 
 mod lfs_collection;
 mod mirror_lifecycle;
+mod outbox_relay;
+mod policy_lane;
 mod replication;
 mod restore_verification;
 mod retention;
@@ -24,7 +26,7 @@ mod wiki;
 
 use std::time::Duration;
 
-use ratatoskr_vault_core::delivery::ValidatedDelivery;
+use ratatoskr_vault_core::delivery::{ValidatedDelivery, correlation_key};
 use ratatoskr_vault_core::error::VaultError;
 use ratatoskr_vault_core::target_state::TargetStatus;
 use secrecy::ExposeSecret as _;
@@ -34,6 +36,8 @@ use uuid::Uuid;
 
 pub use crate::lfs_collection::LfsCollectionTerminal;
 pub use crate::mirror_lifecycle::QuotaReservationOutcome;
+pub use crate::outbox_relay::{ACKNOWLEDGEMENT_EVENT_TYPE, DueOutboxRow};
+pub use crate::policy_lane::{PolicyCommandOutcome, PolicyDecisionRecord, RecordedDecision};
 pub use crate::replication::{
     DueReplicationUnit, ReplicaTargetObservation, StoredReplicaPlacement,
 };
@@ -200,7 +204,7 @@ impl Database {
         to_status: TargetStatus,
         governing: &ValidatedDelivery,
     ) -> Result<(), VaultError> {
-        let (policy_revision, correlation_id) = governed_inputs(governing)?;
+        let (policy_revision, correlation_key) = governed_inputs(governing)?;
 
         let mut tx = self
             .pool
@@ -225,7 +229,7 @@ impl Database {
         .bind(governing.include_releases.unwrap_or(false))
         .bind(governing.include_issues.unwrap_or(false))
         .bind(governing.offsite_required.unwrap_or(false))
-        .bind(correlation_id)
+        .bind(&governing.correlation_id)
         .execute(&mut *tx)
         .await
         .map_err(|err| classify_status_update_failure(&err))?;
@@ -248,7 +252,7 @@ impl Database {
             to_status,
             governing,
             policy_revision,
-            correlation_id,
+            correlation_key,
         )
         .await?;
 
@@ -272,11 +276,11 @@ impl Database {
                          now())",
             )
             .bind(Uuid::now_v7())
-            .bind(target_id)
+            .bind(target_id.to_string())
             .bind(&from_status)
             .bind(to_status.as_str())
             .bind(policy_revision)
-            .bind(correlation_id)
+            .bind(&governing.correlation_id)
             .execute(&mut *tx)
             .await
             .map_err(|err| classify_status_update_failure(&err))?;
@@ -306,7 +310,7 @@ impl Database {
         message_id: Uuid,
         delivery: &ValidatedDelivery,
     ) -> Result<Uuid, VaultError> {
-        let (policy_revision, correlation_id) = governed_inputs(delivery)?;
+        let (policy_revision, _) = governed_inputs(delivery)?;
 
         let mut tx = self
             .pool
@@ -361,9 +365,9 @@ impl Database {
                              now())",
                 )
                 .bind(Uuid::now_v7())
-                .bind(id)
+                .bind(id.to_string())
                 .bind(policy_revision)
-                .bind(correlation_id)
+                .bind(&delivery.correlation_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|err| classify_status_update_failure(&err))?;
@@ -386,8 +390,8 @@ impl Database {
             "insert into git_vault.desired_state_revisions
                  (revision_id, target_id, policy_revision, preservation_level, pinned,
                   include_wiki, include_releases, include_issues, offsite_required,
-                  correlation_id, received_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+                  correlation_id, source, received_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
              on conflict do nothing",
         )
         .bind(Uuid::now_v7())
@@ -399,7 +403,8 @@ impl Database {
         .bind(delivery.include_releases.unwrap_or(false))
         .bind(delivery.include_issues.unwrap_or(false))
         .bind(delivery.offsite_required.unwrap_or(false))
-        .bind(correlation_id)
+        .bind(&delivery.correlation_id)
+        .bind(source)
         .execute(&mut *tx)
         .await
         .map_err(|err| classify_status_update_failure(&err))?;
@@ -578,8 +583,8 @@ fn classify_status_update_failure(err: &sqlx::Error) -> VaultError {
     VaultError::StorageFailed
 }
 
-/// The revision number and correlation id every governed record must carry, checked once at
-/// the persistence edge.
+/// The revision number every governed record must carry and the UUID key its correlation
+/// identifier maps to in retention evidence, checked once at the persistence edge.
 fn governed_inputs(delivery: &ValidatedDelivery) -> Result<(i64, Uuid), VaultError> {
     let policy_revision = delivery
         .policy_revision
@@ -590,14 +595,12 @@ fn governed_inputs(delivery: &ValidatedDelivery) -> Result<(i64, Uuid), VaultErr
         i64::try_from(policy_revision).map_err(|_| VaultError::InvalidDelivery {
             field: "policy_revision",
         })?;
-    let correlation_id: Uuid =
-        delivery
-            .correlation_id
-            .parse()
-            .map_err(|_| VaultError::InvalidDelivery {
-                field: "correlation_id",
-            })?;
-    Ok((policy_revision, correlation_id))
+    if delivery.correlation_id.is_empty() {
+        return Err(VaultError::InvalidDelivery {
+            field: "correlation_id",
+        });
+    }
+    Ok((policy_revision, correlation_key(&delivery.correlation_id)))
 }
 
 /// The one revision that governs a target's reconciliation, as planning may consume it.
@@ -626,9 +629,9 @@ pub struct GoverningPolicy {
     pub include_issues: bool,
     /// Whether an off-host copy is required.
     pub offsite_required: bool,
-    /// The correlation id of the governing delivery.
-    pub correlation_id: Uuid,
+    /// The correlation identifier of the governing delivery, verbatim.
+    pub correlation_id: String,
 }
 
 /// One governing-revision row straight from the query; positional order must match the SELECT.
-type GoverningRow = (Uuid, i64, String, bool, bool, bool, bool, bool, Uuid);
+type GoverningRow = (Uuid, i64, String, bool, bool, bool, bool, bool, String);

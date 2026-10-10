@@ -135,7 +135,7 @@ fn governed_record(policy: &GoverningPolicy) -> Result<ValidatedDelivery, VaultE
         include_releases: Some(policy.include_releases),
         include_issues: Some(policy.include_issues),
         offsite_required: Some(policy.offsite_required),
-        correlation_id: policy.correlation_id.to_string(),
+        correlation_id: policy.correlation_id.clone(),
         policy_revision: Some(u64::try_from(policy.policy_revision).map_err(|_| {
             VaultError::InvalidDelivery {
                 field: "policy_revision",

@@ -257,7 +257,10 @@ create table git_vault.desired_state_revisions (
     include_releases    boolean     not null default false,
     include_issues      boolean     not null default false,
     offsite_required    boolean     not null default false,
-    correlation_id      uuid        not null,
+    correlation_id      text        not null,
+    -- The inbox source of the delivery that carried the revision; null for a revision no transport
+    -- delivered (a wiki child inherits its parent's policy without a delivery of its own).
+    source              text,
     received_at         timestamptz not null,
 
     -- The preservation levels the desired-state contract names.
@@ -266,15 +269,23 @@ create table git_vault.desired_state_revisions (
             'none', 'metadata_only', 'git_mirror', 'git_mirror_with_lfs', 'complete_archive'
         )),
     constraint desired_state_revisions_revision_is_positive
-        check (policy_revision > 0)
+        check (policy_revision > 0),
+    constraint desired_state_revisions_correlation_is_bounded
+        check (length(correlation_id) between 1 and 256),
+    constraint desired_state_revisions_source_is_bounded
+        check (source is null or length(source) between 1 and 64)
 );
 
 comment on table git_vault.desired_state_revisions is
     'Append-only evidence of desired state. Reconciliation reads the LATEST revision and ignores '
     'older duplicates and out-of-order deliveries; keeping history makes that decision auditable.';
 comment on column git_vault.desired_state_revisions.correlation_id is
-    'The correlation id of the delivery that carried this revision, for tracing a decision back to '
-    'the message that caused it.';
+    'The correlation identifier of the delivery that carried this revision, verbatim: a UUID from '
+    'a catalog delivery, `backup_policy:<version>` from the policy lane. For tracing a decision '
+    'back to the message that caused it.';
+comment on column git_vault.desired_state_revisions.source is
+    'The inbox source label of the transport lane that delivered this revision. Which targets a '
+    'source still governs is a read of the highest revision per target, never a separate list.';
 
 -- One revision number is used at most once per target, so a redelivered old event cannot win over
 -- a newer one already recorded.
@@ -1428,15 +1439,29 @@ create table git_vault.outbox (
     event_id        uuid        primary key,
     event_type      text        not null,
     aggregate_type  text        not null,
-    aggregate_id    uuid        not null,
+    -- An entity reference, not an identity: a target id, a report id, or `backup_policy:<version>`.
+    aggregate_id    text        not null,
     payload         jsonb       not null,
     created_at      timestamptz not null,
     published_at    timestamptz,
+    -- Relay bookkeeping (XR-021 S02 rule 3): a failed publish counts, keeps a safe class token and
+    -- backs off, so a failing head row never starves the rows behind it.
+    attempt_count   integer     not null default 0,
+    last_error      text,
+    next_attempt_at timestamptz,
 
-    -- Event names may carry several dotted segments (design D6: vault.target.state_changed.v1);
-    -- the version suffix stays terminal and numeric.
-    constraint outbox_event_type_is_versioned
-        check (event_type ~ '^vault(\.[a-z_]+)+\.v[0-9]+$'),
+    -- A CLOSED list (XR-021 S02 rule 2): a type the relay has no subject for cannot be inserted.
+    constraint outbox_event_type_is_known
+        check (event_type in (
+            'vault.target.state_changed.v1',
+            'vault.snapshot.verification_failed.v1',
+            'vault.restore.failed.v1',
+            'vault.backup_policy.acknowledged.v1'
+        )),
+    constraint outbox_attempts_are_not_negative
+        check (attempt_count >= 0),
+    constraint outbox_last_error_is_a_class_token
+        check (last_error is null or last_error ~ '^[a-z_]{1,64}$'),
     constraint outbox_aggregate_type_is_bounded
         check (length(aggregate_type) between 1 and 64)
 );
@@ -1446,6 +1471,44 @@ comment on table git_vault.outbox is
     'evidence exists; the payload carries references and hashes, never credentials or repository '
     'contents.';
 create index outbox_unpublished_idx on git_vault.outbox (created_at) where published_at is null;
+-- The relay's only read: due acknowledgement rows in creation order.
+create index outbox_acknowledgement_due_idx
+    on git_vault.outbox (created_at, event_id)
+    where published_at is null and event_type = 'vault.backup_policy.acknowledged.v1';
+
+-- ---------------------------------------------------------------------------------------------
+-- backup_policy_commands: one row per policy command Vault decided
+-- ---------------------------------------------------------------------------------------------
+
+create table git_vault.backup_policy_commands (
+    command_id          uuid        primary key,
+    policy_version      bigint      not null,
+    outcome             text        not null,
+    rejection_code      text,
+    acknowledgement_id  uuid        not null unique references git_vault.outbox (event_id),
+    decided_at          timestamptz not null,
+
+    constraint backup_policy_commands_version_is_positive
+        check (policy_version > 0),
+    constraint backup_policy_commands_outcome_is_known
+        check (outcome in ('accepted', 'rejected')),
+    -- A rejection explains itself with a stable code; an acceptance carries none.
+    constraint backup_policy_commands_code_matches_outcome
+        check ((outcome = 'rejected') = (rejection_code is not null))
+);
+
+comment on table git_vault.backup_policy_commands is
+    'The decision ledger of the policy lane. The last applied policy version is the highest '
+    'accepted version, and a command id decided once is never decided again, so a redelivered '
+    'command acknowledges the broker message and writes nothing. Append-only evidence.';
+
+-- One version is applied at most once.
+create unique index backup_policy_commands_accepted_version_key
+    on git_vault.backup_policy_commands (policy_version) where outcome = 'accepted';
+
+create trigger backup_policy_commands_are_append_only
+    before update or delete on git_vault.backup_policy_commands
+    for each row execute function git_vault.reject_terminal_evidence_mutation();
 
 -- ---------------------------------------------------------------------------------------------
 -- inbox: deduplication for at-least-once delivery into Vault

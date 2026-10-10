@@ -26,6 +26,20 @@ pub struct IncomingDelivery {
     pub delivery: DesiredStateDelivery,
 }
 
+/// The namespace the correlation key of a non-UUID identifier is derived in.
+const CORRELATION_NAMESPACE: Uuid = Uuid::from_u128(0x7261_7461_746f_736b_7200_7661_756c_7401);
+
+/// The UUID that keys retention evidence for a delivery's correlation identifier.
+///
+/// Evidence tables key their rows by UUID, while the contract's correlation identifier is text
+/// (`backup_policy:<version>` from the policy lane). A UUID identifier is its own key; any other
+/// text maps to a stable `UUIDv5` of itself, so evidence stays linkable to the revision text.
+#[must_use]
+pub fn correlation_key(correlation_id: &str) -> Uuid {
+    Uuid::parse_str(correlation_id)
+        .unwrap_or_else(|_| Uuid::new_v5(&CORRELATION_NAMESPACE, correlation_id.as_bytes()))
+}
+
 /// A desired-state record exactly as delivered, before any validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredStateDelivery {

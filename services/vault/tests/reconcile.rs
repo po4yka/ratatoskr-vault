@@ -80,7 +80,7 @@ async fn ingest_then_converge_applies_first_policy_end_to_end() {
          from git_vault.outbox
          where aggregate_id = $1 and event_type = 'vault.target.state_changed.v1'",
     )
-    .bind(target_id)
+    .bind(target_id.to_string())
     .fetch_all(fixture.pool())
     .await
     .expect("the outbox read must run");

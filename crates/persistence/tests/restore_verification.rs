@@ -75,16 +75,16 @@ async fn failed_drill_report_and_alert_fact_commit_atomically_and_remain_immutab
     assert_eq!(stored.5, 2);
     assert!(stored.6);
     assert!(!stored.7);
-    let event: (String, Uuid, String) = sqlx::query_as(
+    let event: (String, String, String) = sqlx::query_as(
         "select event_type, aggregate_id, payload->>'failure_class'
          from git_vault.outbox where aggregate_id = $1",
     )
-    .bind(drill_id)
+    .bind(drill_id.to_string())
     .fetch_one(fixture.pool())
     .await
     .expect("alert-worthy outbox fact");
     assert_eq!(event.0, "vault.restore.failed.v1");
-    assert_eq!(event.1, drill_id);
+    assert_eq!(event.1, drill_id.to_string());
     assert_eq!(event.2, "ref_mismatch");
     assert!(
         sqlx::query("update git_vault.restore_drills set outcome = 'passed' where drill_id = $1")

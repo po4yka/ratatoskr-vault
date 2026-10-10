@@ -69,7 +69,7 @@ async fn stored_status(fixture: &TestDatabase, target_id: Uuid) -> String {
 /// How many state-changed events the target owes the bus.
 async fn outbox_rows(fixture: &TestDatabase, target_id: Uuid) -> i64 {
     sqlx::query_scalar("select count(*) from git_vault.outbox where aggregate_id = $1")
-        .bind(target_id)
+        .bind(target_id.to_string())
         .fetch_one(fixture.pool())
         .await
         .expect("the outbox count must run")
@@ -274,7 +274,7 @@ async fn legal_move_persists_status_and_exactly_one_state_changed_event() {
          from git_vault.outbox
          where aggregate_id = $1 and event_type = 'vault.target.state_changed.v1'",
     )
-    .bind(target)
+    .bind(target.to_string())
     .fetch_one(fixture.pool())
     .await
     .expect("the event row must exist");

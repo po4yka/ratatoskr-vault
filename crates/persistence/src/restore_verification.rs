@@ -217,7 +217,7 @@ impl Database {
                          'snapshot_verification', $2, $3, now())",
             )
             .bind(Uuid::now_v7())
-            .bind(report.verification_id)
+            .bind(report.verification_id.to_string())
             .bind(payload)
             .execute(&mut *transaction)
             .await
@@ -360,7 +360,7 @@ impl Database {
                  values ($1, 'vault.restore.failed.v1', 'restore_drill', $2, $3, now())",
             )
             .bind(Uuid::now_v7())
-            .bind(report.drill_id)
+            .bind(report.drill_id.to_string())
             .bind(payload)
             .execute(&mut *transaction)
             .await

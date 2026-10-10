@@ -118,7 +118,7 @@ async fn seed_parent(fixture: &TestDatabase) -> Uuid {
     )
     .bind(Uuid::now_v7())
     .bind(parent)
-    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7().to_string())
     .execute(fixture.pool())
     .await
     .expect("parent policy");
