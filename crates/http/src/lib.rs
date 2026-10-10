@@ -16,6 +16,7 @@
 mod admin;
 mod lifecycle;
 mod shutdown;
+mod supervise;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use tracing::field::Empty;
 pub use crate::admin::admin_router;
 pub use crate::lifecycle::{Check, CheckName, CheckReason, CheckState, RuntimeState};
 pub use crate::shutdown::{Served, ShutdownOutcome, drain_and_close, serve};
+pub use crate::supervise::{StopReason, wait_for_stop};
 
 /// How often the database prober asks whether the dependency is still there.
 ///
@@ -146,7 +148,13 @@ pub async fn run<R: ServiceRoutes>(routes: R) -> ExitCode {
     });
     drop(startup);
 
-    shutdown::signal().await;
+    let mut tasks = tasks;
+    let stop = wait_for_stop(&mut tasks, shutdown::signal()).await;
+    if stop == StopReason::TaskExited {
+        // The lane's work has stopped, so the process says so: readiness fails through the
+        // drain, the supervisor sees a non-zero exit and restarts a process that can work.
+        tracing::error!("a background task returned before shutdown; the process is stopping");
+    }
     let outcome =
         drain_and_close(&runtime, &config.shutdown, vec![server], shutdown::signal()).await;
     tracing::info!(graceful = outcome.graceful(), "the process stopped");
@@ -164,6 +172,9 @@ pub async fn run<R: ServiceRoutes>(routes: R) -> ExitCode {
     }
 
     guard.shutdown();
+    if stop == StopReason::TaskExited {
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
 

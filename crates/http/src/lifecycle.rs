@@ -11,6 +11,13 @@ const DATABASE_UP: u8 = 1;
 /// The last probe did not answer.
 const DATABASE_DOWN: u8 = 2;
 
+/// No message bus is configured for this deployment.
+const BUS_ABSENT: u8 = 0;
+/// The bus is connected and its consumer is verified.
+const BUS_UP: u8 = 1;
+/// The bus is configured and not connected.
+const BUS_DOWN: u8 = 2;
+
 /// The facts readiness is computed from.
 ///
 /// Shared by the admin router, which reads it, and the shutdown sequence, which writes it.
@@ -23,6 +30,9 @@ pub struct RuntimeState {
     /// The database: 0 not configured, 1 answering, 2 not answering. Three states rather than a
     /// `bool`, because "no database" and "a database that is down" must not report the same thing.
     database: AtomicU8,
+    /// The message bus: 0 not configured, 1 connected, 2 not connected. Three states for the same
+    /// reason as the database.
+    bus: AtomicU8,
 }
 
 impl RuntimeState {
@@ -33,6 +43,7 @@ impl RuntimeState {
             startup_complete: AtomicBool::new(false),
             draining: AtomicBool::new(false),
             database: AtomicU8::new(DATABASE_ABSENT),
+            bus: AtomicU8::new(BUS_ABSENT),
         };
         state.publish_readiness();
         state
@@ -69,6 +80,23 @@ impl RuntimeState {
         }
     }
 
+    /// Record whether the message bus is connected. Called by the policy lane: once when its
+    /// consumer is verified, and again whenever the connection is lost.
+    pub fn set_bus_connected(&self, connected: bool) {
+        self.bus
+            .store(if connected { BUS_UP } else { BUS_DOWN }, Ordering::Release);
+        self.publish_readiness();
+    }
+
+    /// Whether the bus is connected, or `None` when no bus is configured.
+    #[must_use]
+    pub fn bus_connected(&self) -> Option<bool> {
+        match self.bus.load(Ordering::Acquire) {
+            BUS_ABSENT => None,
+            state => Some(state == BUS_UP),
+        }
+    }
+
     /// A shutdown signal arrived. Readiness fails immediately; the listeners stay open.
     pub fn begin_draining(&self) {
         self.draining.store(true, Ordering::Release);
@@ -101,25 +129,32 @@ impl RuntimeState {
         // for something that does not exist is the readiness equivalent of an always-zero metric.
         // The declaration order above is alphabetical by variant, so inserting at the front keeps
         // the body stable without a sort.
-        match self.database_reachable() {
-            None => {}
-            Some(up) => checks.insert(
-                0,
-                Check {
-                    name: CheckName::Database,
-                    state: CheckState::from_pass(up),
-                    reason: (!up).then_some(CheckReason::DependencyUnavailable),
-                },
-            ),
+        for (name, reported) in [
+            (CheckName::Database, self.database_reachable()),
+            (CheckName::Bus, self.bus_connected()),
+        ] {
+            if let Some(up) = reported {
+                checks.insert(
+                    0,
+                    Check {
+                        name,
+                        state: CheckState::from_pass(up),
+                        reason: (!up).then_some(CheckReason::DependencyUnavailable),
+                    },
+                );
+            }
         }
 
         checks
     }
 
-    /// Whether new work may be routed to this process.
+    /// Whether new work may be routed to this process: every reported check passes. A dependency
+    /// that is configured and down is a failed check, never a ready process beside it.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.startup_complete.load(Ordering::Acquire) && !self.draining.load(Ordering::Acquire)
+        self.checks()
+            .iter()
+            .all(|check| check.state == CheckState::Pass)
     }
 
     /// `vault_readiness`, the aggregate of [`Self::checks`].
@@ -152,6 +187,9 @@ pub struct Check {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CheckName {
+    /// The message bus is connected and its consumer is verified. Present only when one is
+    /// configured.
+    Bus,
     /// The database answers. Present only when one is configured.
     Database,
     /// No shutdown signal has arrived.

@@ -172,3 +172,56 @@ async fn every_response_including_the_unknown_path_sets_no_store() {
         );
     }
 }
+
+/// A configured-but-lost bus is a named failed check and the process is not ready: the policy
+/// lane cannot do its work, and a ready process must not claim otherwise.
+#[tokio::test]
+async fn a_down_bus_is_a_failed_named_check_and_not_ready() {
+    let state = Arc::new(RuntimeState::new());
+    state.mark_startup_complete();
+    let mut router = router_over(Arc::clone(&state));
+
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("\"bus\""),
+        "no bus is configured, so no bus check may appear: {body}"
+    );
+
+    state.set_bus_connected(true);
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("\"bus\""),
+        "a connected bus is reported as a passing check: {body}"
+    );
+
+    state.set_bus_connected(false);
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body.contains("\"bus\""),
+        "the bus check must be present: {body}"
+    );
+    assert!(
+        body.contains("dependency_unavailable"),
+        "the closed-vocabulary reason must name the dependency: {body}"
+    );
+}
+
+/// Readiness is the conjunction of its checks: a started process whose database stopped
+/// answering is not ready, instead of reporting `ready` beside a failed check.
+#[tokio::test]
+async fn a_down_database_makes_the_process_not_ready() {
+    let state = Arc::new(RuntimeState::new());
+    state.mark_startup_complete();
+    state.set_database_reachable(true);
+    let mut router = router_over(Arc::clone(&state));
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    state.set_database_reachable(false);
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.contains("\"state\":\"not_ready\""), "{body}");
+}
