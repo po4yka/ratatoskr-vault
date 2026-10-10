@@ -55,6 +55,10 @@ jobs:
       # Where the suite creates and drops its disposable databases. Matches compose.yaml, so the
       # same command works on a laptop and here.
       VAULT_TEST_DATABASE_URL: postgres://vault:vault@127.0.0.1:5432/vault
+      # The shared JetStream broker the policy-lane tests reset and use. The tests that need an
+      # authorization-enabled or disposable broker start their own `nats-server` from the same
+      # binary, installed below.
+      VAULT_TEST_NATS_URL: nats://127.0.0.1:4222
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,6 +77,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes git-lfs
           git-lfs version
+
+      # The policy-lane tests need a real JetStream broker and the `nats-server` program itself.
+      # The binary is taken out of the pinned image (the digest Knowledge's gate uses) so one pull
+      # serves both and no unpinned download enters the job. A failed start fails the step.
+      - name: Install nats-server and start the shared broker
+        run: |
+          set -euo pipefail
+          id=$(docker create nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da)
+          sudo docker cp "$id:/nats-server" /usr/local/bin/nats-server
+          docker rm "$id"
+          nats-server --version
+          nats-server -js -a 127.0.0.1 -p 4222 > "$RUNNER_TEMP/nats.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/nats.log" >&2
+          echo "NATS did not become reachable" >&2
+          exit 1
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 

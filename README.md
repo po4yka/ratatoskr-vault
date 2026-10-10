@@ -397,5 +397,15 @@ reports are append-only and alert-worthy failure facts enter the transactional o
 repository gate is `.github/workflows/ci.yml`; `DEVELOPMENT.md` documents the identical command list.
 
 Not yet implemented: provider-API auxiliary collectors (none approved), legacy adoption (10),
-provider bucket-policy/lifecycle automation, and the event-bus
-publisher/consumer that will deliver persisted outbox facts. No code claims those capabilities.
+provider bucket-policy/lifecycle automation, and relaying any outbox fact other than the
+backup-policy acknowledgement (`vault.target.state_changed.v1` and the alert facts stay in the
+outbox, unpublished, until their subjects and ACL entries exist). No code claims those
+capabilities.
+
+The policy lane is implemented (the contract is XR-021 CONTRACTS.md sections S01 to S04 and S09):
+`policy_feed` maps the whole-catalog `DesiredBackupPolicy` to desired-state deliveries, the consumer
+in `services/vault/src/policy_bus` verifies the Edge-provisioned durable
+`ratatoskr_vault_backup_policy`, a command ledger makes a redelivery a no-op, and an ack-gated relay
+publishes exactly one `vault.backup_policy.acknowledged.v1` per policy version. The bus identity is
+`deploy/nats/identity.conf`; its nkey seed is `/etc/ratatoskr/vault.nkey`, named by
+`RATATOSKR__BUS__NKEY_SEED_PATH`. Running the mirrors for the enrolled targets is still planned.

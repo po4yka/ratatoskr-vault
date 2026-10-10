@@ -17,7 +17,13 @@ A PostgreSQL server is needed by every persistence test and by the boot test:
 docker compose up -d
 ```
 
-`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. No NATS is required. Snapshot tests use a temporary local filesystem BlobStore. Replica and retention-deletion tests use an in-process Axum S3-compatible request-subset harness bound to `127.0.0.1:0`; they use no personal credentials or provider account. They prove exact-key DELETE/GET absence behavior against the adapter contract, not production TLS, IAM, versioning, Object Lock, provider consistency, or lifecycle compatibility. Run a separately authorized real-provider smoke test before enabling destructive production retention.
+`compose.yaml` serves PostgreSQL 17 on 5432 with user/password/database `vault`, byte-identical to `.env.example`, the default in `crates/persistence/src/test_support.rs`, and CI. If another Ratatoskr repository's postgres occupies 5432, either stop it or point the suite elsewhere with `VAULT_TEST_DATABASE_URL`. The policy-lane tests also need a NATS server with JetStream (the `nats-server` program on `PATH`, for the tests that start their own broker, and a running server for the shared one). Start one on a free port and point the suite at it with `VAULT_TEST_NATS_URL` (default `nats://127.0.0.1:4222`):
+
+```bash
+nats-server -js -a 127.0.0.1 -p 4222 &
+```
+
+Tests that spawn a private broker choose a free loopback port; `VAULT_TEST_NATS_PORTS=<start>-<end>` confines them to a range. A missing broker fails the suite, it never skips. Snapshot tests use a temporary local filesystem BlobStore. Replica and retention-deletion tests use an in-process Axum S3-compatible request-subset harness bound to `127.0.0.1:0`; they use no personal credentials or provider account. They prove exact-key DELETE/GET absence behavior against the adapter contract, not production TLS, IAM, versioning, Object Lock, provider consistency, or lifecycle compatibility. Run a separately authorized real-provider smoke test before enabling destructive production retention.
 
 The default retention policy is keep three restorable snapshots per mirror, a 30-day age floor,
 and a 30-day immutable deletion grace. Schema bounds are documented in `README.md`. To halt a
@@ -60,7 +66,7 @@ cargo run -p ratatoskr-vault
 The operator listener binds `127.0.0.1:9570` by default:
 
 - `GET /health/live` — liveness; consults nothing external;
-- `GET /health/ready` — readiness with named checks (startup, drain, database when configured);
+- `GET /health/ready` — readiness with named checks (startup, drain, database when configured, bus when configured); the process is ready only when every reported check passes;
 - `GET /metrics` — Prometheus text exposition;
 - `GET /version` — build identity.
 
@@ -77,6 +83,14 @@ Exit codes: `0` clean run, `1` runtime startup failure (telemetry, route build, 
 One file: `schema.sql` at the repository root, applied by the binary at startup to a fresh database, embedded at compile time into `ratatoskr-vault-persistence`. There are no migrations and no migration tooling: a schema change edits `schema.sql` in place, and a test database is created from that definition (`TestDatabase::create`). While the development status holds this is binding; see README.
 
 To reset a dirty local database: drop it (`docker compose down -v` recreates the cluster) — there is no upgrade path to preserve.
+
+## Message bus: the policy lane (XR-021)
+
+Set `RATATOSKR__BUS__URL` (`nats://` or `tls://`) to run the lane; it requires `RATATOSKR__DATABASE__URL` (a bus without a database is refused with exit 78). `RATATOSKR__BUS__NKEY_SEED_PATH` is the absolute path of the nkey seed (`/etc/ratatoskr/vault.nkey` on the deployment target; required for `tls://`). The seed is read at runtime and never logged.
+
+Vault consumes the durable `ratatoskr_vault_backup_policy` on `ratatoskr_commands` (filter `cmd.vault.backup_policy.apply_requested.v1`). Edge provisions it; Vault verifies filter, acknowledgement policy and ack wait at startup and refuses to start when the durable is missing or differs, so start Edge first. Each command is applied through `policy_feed` and `reconcile::run_cycle`, recorded once in `git_vault.backup_policy_commands`, and answered by exactly one `vault.backup_policy.acknowledged.v1` that a relay publishes to `evt.vault.backup_policy.acknowledged.v1` with `Nats-Msg-Id`, marking the outbox row published only after the broker's `PubAck`. Input that can never be valid (not an envelope, another producer, a tenant on a catalog-wide command, an undecodable payload) is terminated; a storage failure is redelivered after 2 seconds.
+
+When the broker connection drops, or the consumer or relay task ends for any reason, `/health/ready` fails on the `bus` check and the process drains and exits 1, so the supervisor restarts it. A `PubAck` timeout is indistinguishable from a permission denial: check the NATS server log for a `Publish Violation`. The permitted subjects are `deploy/nats/identity.conf`, a byte-equal copy of the VAULT stanza of `ratatoskr-platform/deploy/nats/ratatoskr.conf`.
 
 ## Git commands (runner, plan item 3)
 
@@ -129,8 +143,9 @@ Signing seed diagnostics are structurally redacted and trusted public keys are e
 
 Terminal verification and drill reports are append-only rows. A failure enqueues
 `vault.snapshot.verification_failed.v1` or `vault.restore.failed.v1` in the same PostgreSQL
-transaction. No event-bus publisher exists in this item: the outbox is durable fleet evidence, not
-a claim that an alert was delivered.
+transaction. No relay publishes these alert facts: the outbox is durable fleet evidence, not
+a claim that an alert was delivered. The only event the relay publishes is the
+backup-policy acknowledgement (see the next section).
 
 ## Off-host replicas (plan item 7)
 

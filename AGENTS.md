@@ -19,9 +19,10 @@ A successful `git fetch` is not a successful backup. Backup success requires ver
 
 Implementation-plan item 1 is complete. The Rust workspace, strict configuration, structured
 telemetry, operator health plane, one editable `schema.sql`, disposable-database tests, and CI gate
-exist. Reconciliation workers, the Git runner, mirrors, snapshots, storage adapters, restore
-verification, retention, and eventing remain absent. Do not assume anything beyond the service
-foundation exists unless it is present in the checkout.
+exist, and so does every later item recorded in README.md under Project status. Eventing is
+limited to the policy lane (XR-021): Vault consumes GitHub's desired backup policy from the bus
+and publishes one acknowledgement per policy version; no other outbox event is relayed. Do not
+assume anything beyond what is present in the checkout.
 
 When creating initial implementation:
 
