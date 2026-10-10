@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           id=$(docker create nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da)
-          sudo docker cp "$id:/nats-server" /usr/local/bin/nats-server
+          sudo docker cp "$id:/usr/local/bin/nats-server" /usr/local/bin/nats-server
           docker rm "$id"
           nats-server --version
           nats-server -js -a 127.0.0.1 -p 4222 > "$RUNNER_TEMP/nats.log" 2>&1 &
