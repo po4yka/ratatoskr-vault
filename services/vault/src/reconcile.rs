@@ -28,8 +28,8 @@ pub struct CycleReport {
 
 /// Runs one full reconciliation cycle over the source's pending messages.
 ///
-/// Each message is validated once and ingested atomically; every touched target is then
-/// converged toward its governing revision by planning against observed state and executing
+/// Each message is validated once and ingested atomically; every target a message names, replayed
+/// or not, is then converged toward its governing revision by planning against observed state and executing
 /// only what today's executor can honestly perform. Forward-looking runner work stays
 /// planned-not-executable and shows up in the logged counters, never as success.
 ///
@@ -38,7 +38,9 @@ pub struct CycleReport {
 /// [`VaultError::InvalidDelivery`] naming the rejected field when a delivery fails validation;
 /// [`VaultError::IllegalTransition`] when the database guard refuses an executor move;
 /// [`VaultError::StorageFailed`] for infrastructure failures, logged. A replayed
-/// `(source, message_id)` pair is absorbed silently: the inbox refuses it and the cycle moves on.
+/// `(source, message_id)` pair is not ingested twice: the inbox refuses it, and the cycle still
+/// converges the target it named, because the attempt that ingested it may have stopped before
+/// converging.
 pub async fn run_cycle(
     database: &Database,
     source: &mut impl DeliverySource,
@@ -59,14 +61,17 @@ pub async fn run_cycle(
             )
             .await
         {
-            Ok(target_id) => {
-                if !touched.contains(&target_id) {
-                    touched.push(target_id);
-                }
+            Ok(target_id) => remember(&mut touched, target_id),
+            // At-least-once transport redelivers and the inbox refused the pair, so nothing new
+            // was written. The earlier attempt may have died before it converged the target, so
+            // the target still joins the convergence below; planning against observed state
+            // makes a repeat harmless.
+            Err(VaultError::DuplicateDelivery) => {
+                let target_id = database
+                    .repository_target(&message.provider, &message.external_repository_id)
+                    .await?;
+                remember(&mut touched, target_id);
             }
-            // At-least-once transport redelivers; the inbox already refused the pair, so the
-            // cycle moves on without touching anything.
-            Err(VaultError::DuplicateDelivery) => {}
             Err(err) => return Err(err),
         }
     }
@@ -81,6 +86,13 @@ pub async fn run_cycle(
         proposed,
         executable,
     })
+}
+
+/// Adds a target to the set the cycle converges, once.
+fn remember(touched: &mut Vec<Uuid>, target_id: Uuid) {
+    if !touched.contains(&target_id) {
+        touched.push(target_id);
+    }
 }
 
 /// Moves one target toward its governing revision.

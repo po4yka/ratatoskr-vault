@@ -47,3 +47,10 @@
 - [x] 8.1 Update `AGENTS.md` current phase, the `delivery.rs` module comment, `README.md`, `DEVELOPMENT.md` (bus section, NATS test prerequisites) and `docs/` references, and document `/etc/ratatoskr/vault.nkey` (documentation: it cannot start from a failing test)
 - [x] 8.2 Provide a NATS server to the CI gate (`.github/workflows/ci.yml`) for `VAULT_TEST_NATS_URL` and the spawned brokers (configuration: it cannot start from a failing test)
 - [x] 8.3 Run the full gate (`cargo fmt`, `clippy`, the 850-line check, `cargo test --workspace --locked`, `cargo build --workspace --locked --release`, `cargo deny check`, `openspec validate --all --strict`) and record the results
+
+## 9. Review fixes: a redelivery must converge
+
+- [x] 9.1 Add `services/vault/tests/policy_bus.rs::a_redelivery_after_a_crash_still_excludes_the_dropped_repository` and `a_redelivery_after_a_crash_still_reactivates_a_readded_repository` (commit a version's deliveries without converging, then redeliver the command), run them against the real broker and disposable PostgreSQL, and observe the dropped repository stay `requested` and the re-added one stay `excluded` (log: `target/xr021-local/red-fix.log`)
+- [x] 9.2 Make the resume converge: `targets_governed_before` reads the state before the command, `run_cycle` resolves and converges the target of a replayed delivery, and the adapter uses a hash set; add the persistence test for the version-stable list; rerun and observe both pass
+- [x] 9.3 Add `services/vault/tests/authorized_bus.rs::the_shipped_lane_runs_under_the_vault_identity` (the shipped `policy_bus::start` under the S03 fragment on an authorization-enabled broker; it proves existing behaviour, so it cannot start from a failing test) and run it
+

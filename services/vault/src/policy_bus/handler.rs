@@ -93,9 +93,10 @@ fn decode(
 /// Applies an acceptable version, then records the decision with its acknowledgement.
 ///
 /// A crash between the two leaves no ledger row, so the redelivery decides again from the same
-/// state: the deliveries carry the same message ids (the inbox absorbs them) and the same
-/// revision numbers (the revision index absorbs them), and only then does the last applied
-/// version move.
+/// state: the repositories to withdraw are read as they stood before the command, so the
+/// deliveries are the same ones with the same message ids (the inbox absorbs the ones already
+/// ingested), the cycle converges every repository they name whether or not its ingest was a
+/// replay, and only then does the last applied version move.
 async fn decide(
     database: &Database,
     command: &CommandEnvelope,
@@ -120,7 +121,9 @@ async fn apply(
     request: &VaultBackupPolicyApplyRequested,
     last_applied: u64,
 ) -> Result<(), VaultError> {
-    let governed = database.targets_governed_by_source(POLICY_SOURCE).await?;
+    let governed = database
+        .targets_governed_before(POLICY_SOURCE, request.policy.policy_version)
+        .await?;
     let deliveries = deliveries_for_policy(command_id, &request.policy, last_applied, &governed)
         .map_err(|_| VaultError::InvalidDelivery {
             field: "policy_version",

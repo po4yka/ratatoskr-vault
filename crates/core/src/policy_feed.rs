@@ -4,6 +4,8 @@
 //! arrive as arguments, so the whole-catalog semantics are decided in one place and tested with
 //! plain values (XR-021 CONTRACTS.md section S09).
 
+use std::collections::HashSet;
+
 use ratatoskr_backup_contracts::{
     DesiredBackupPolicy, PolicyAcknowledged, PolicyOutcome, PolicyRejectionCode,
     PolicyRejectionReason,
@@ -60,9 +62,10 @@ pub fn deliveries_for_policy(
         .iter()
         .map(|entry| entry.repository_ref.to_wire())
         .collect();
+    let kept: HashSet<&str> = wanted.iter().map(String::as_str).collect();
     let dropped = previously_governed
         .iter()
-        .filter(|reference| !wanted.contains(reference));
+        .filter(|reference| !kept.contains(reference.as_str()));
 
     let mirrored = wanted
         .iter()

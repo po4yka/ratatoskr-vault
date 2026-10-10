@@ -98,7 +98,7 @@ async fn ingest_keeps_source_and_text_correlation_and_lists_governed_targets() {
 
     // A and B are mirrored by the policy; C was already withdrawn, so it is not "governed".
     let governed = database
-        .targets_governed_by_source(SOURCE)
+        .targets_governed_before(SOURCE, 8)
         .await
         .expect("the governed list");
     assert_eq!(governed, vec![REPO_A.to_owned(), REPO_B.to_owned()]);
@@ -116,7 +116,7 @@ async fn ingest_keeps_source_and_text_correlation_and_lists_governed_targets() {
         .expect("a newer revision from another source");
     assert_eq!(
         database
-            .targets_governed_by_source(SOURCE)
+            .targets_governed_before(SOURCE, 8)
             .await
             .expect("the governed list"),
         vec![REPO_A.to_owned()]
@@ -128,6 +128,67 @@ async fn ingest_keeps_source_and_text_correlation_and_lists_governed_targets() {
         .await
         .expect("a withdrawal with a text correlation converges");
 
+    fixture.cleanup().await.expect("cleanup");
+}
+
+/// The governed list is a function of the state before the command: the withdrawal a command
+/// wrote itself does not hide the repository from the same command's redelivery, and a later
+/// command no longer lists it.
+#[tokio::test]
+async fn the_governed_list_ignores_the_source_s_own_revisions_from_the_asked_version() {
+    let fixture = test_database().await;
+    let database = &fixture.database;
+    for (level, revision) in [("git_mirror", 1), ("none", 2)] {
+        database
+            .ingest_delivery(
+                "github",
+                REPO_A,
+                SOURCE,
+                Uuid::now_v7(),
+                &delivery(level, revision),
+            )
+            .await
+            .expect("a policy delivery");
+    }
+
+    assert_eq!(
+        database
+            .targets_governed_before(SOURCE, 2)
+            .await
+            .expect("list"),
+        vec![REPO_A.to_owned()],
+        "version 2 withdrew the repository, and asking before version 2 still lists it"
+    );
+    assert_eq!(
+        database
+            .targets_governed_before(SOURCE, 3)
+            .await
+            .expect("list"),
+        Vec::<String>::new(),
+        "after version 2 the repository is withdrawn"
+    );
+    assert_eq!(
+        database
+            .targets_governed_before(SOURCE, 1)
+            .await
+            .expect("list"),
+        Vec::<String>::new(),
+        "before version 1 nothing was governed"
+    );
+
+    let target = database
+        .repository_target("github", REPO_A)
+        .await
+        .expect("a known repository resolves to its target");
+    let again = database
+        .repository_target("github", REPO_A)
+        .await
+        .expect("and resolves to the same one");
+    assert_eq!(target, again);
+    assert_eq!(
+        database.repository_target("github", REPO_B).await,
+        Err(ratatoskr_vault_core::error::VaultError::InvalidDelivery { field: "target_id" })
+    );
     fixture.cleanup().await.expect("cleanup");
 }
 

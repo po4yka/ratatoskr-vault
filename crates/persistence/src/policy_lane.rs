@@ -54,20 +54,29 @@ pub enum RecordedDecision {
 }
 
 impl Database {
-    /// The external ids of the repository targets whose governing revision came from `source`
-    /// at a preservation level above `none`, sorted.
+    /// The external ids of the repository targets whose governing revision, as it stood before
+    /// policy version `version` of `source` was applied, came from `source` at a preservation
+    /// level above `none`, sorted.
     ///
     /// The governing revision is the highest one, exactly as reconciliation reads it, so a newer
     /// revision from another source takes a target out of this list, and a target the source
-    /// already withdrew is not listed again.
+    /// already withdrew in an earlier version is not listed again. The source's own revisions at
+    /// `version` or above are ignored, so the answer is the same before the command's deliveries
+    /// are ingested, while they are, and after they all are: a redelivered command recomputes the
+    /// repositories it must withdraw even though its first attempt already wrote the withdrawal.
     ///
     /// # Errors
     ///
+    /// [`VaultError::InvalidDelivery`] when `version` exceeds the storage range;
     /// [`VaultError::StorageFailed`] for infrastructure failures, logged.
-    pub async fn targets_governed_by_source(
+    pub async fn targets_governed_before(
         &self,
         source: &str,
+        version: u64,
     ) -> Result<Vec<String>, VaultError> {
+        let version = i64::try_from(version).map_err(|_| VaultError::InvalidDelivery {
+            field: "policy_version",
+        })?;
         sqlx::query_scalar(
             "select target.external_repository_id
              from git_vault.targets target
@@ -75,6 +84,7 @@ impl Database {
                  select revision.source, revision.preservation_level
                  from git_vault.desired_state_revisions revision
                  where revision.target_id = target.target_id
+                   and (revision.source is distinct from $1 or revision.policy_revision < $2)
                  order by revision.policy_revision desc
                  limit 1
              ) governing on true
@@ -84,9 +94,35 @@ impl Database {
              order by target.external_repository_id",
         )
         .bind(source)
+        .bind(version)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| classify_status_update_failure(&error))
+    }
+
+    /// The target of a repository the inbox already knows, for a replayed delivery that must
+    /// still be converged.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::InvalidDelivery`] naming `target_id` when the repository has no target;
+    /// [`VaultError::StorageFailed`] for infrastructure failures, logged.
+    pub async fn repository_target(
+        &self,
+        provider: &str,
+        external_repository_id: &str,
+    ) -> Result<Uuid, VaultError> {
+        sqlx::query_scalar(
+            "select target_id from git_vault.targets
+             where provider = $1 and external_repository_id = $2
+               and target_kind = 'repository'",
+        )
+        .bind(provider)
+        .bind(external_repository_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| classify_status_update_failure(&error))?
+        .ok_or(VaultError::InvalidDelivery { field: "target_id" })
     }
 
     /// The highest policy version Vault accepted, or zero before the first one.

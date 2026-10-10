@@ -18,13 +18,18 @@ use std::time::{Duration, Instant};
 
 use async_nats::jetstream;
 use futures_util::StreamExt as _;
-use ratatoskr_backup_contracts::{PolicyAcknowledged, PolicyOutcome, PolicyRejectionCode};
+use ratatoskr_backup_contracts::{
+    PolicyAcknowledged, PolicyOutcome, PolicyRejectionCode, VaultBackupPolicyApplyRequested,
+};
+use ratatoskr_event_envelope::CommandEnvelope;
 use ratatoskr_vault::policy_bus::{self, COMMANDS_STREAM, DURABLE};
 use ratatoskr_vault::test_support::{
     StoredAcknowledgement, acknowledgement_count, command_bytes, nats_url, provision_topology,
     publish_command, wait_for_acknowledgements, wait_until_settled,
 };
 use ratatoskr_vault_core::config::BusConfig;
+use ratatoskr_vault_core::delivery::validate_delivery;
+use ratatoskr_vault_core::policy_feed::{POLICY_SOURCE, deliveries_for_policy};
 use ratatoskr_vault_http::{CheckName, CheckState, RuntimeState};
 use ratatoskr_vault_persistence::test_support::TestDatabase;
 use tokio::sync::{Mutex, MutexGuard};
@@ -336,10 +341,159 @@ async fn a_repository_dropped_from_the_next_version_is_withdrawn() {
     assert_eq!(
         lane.fixture
             .database
-            .targets_governed_by_source("github-policy")
+            .targets_governed_before("github-policy", 3)
             .await
             .expect("the governed targets"),
         vec![REPO_A.to_owned()]
+    );
+    lane.finish().await;
+}
+
+/// What a process that died after ingesting a version and before converging or deciding leaves
+/// behind: every delivery of the command committed, no target moved, no ledger row. It runs the
+/// same adapter the lane runs, so the rows are exactly the ones the lane would have written.
+async fn ingest_without_converging(
+    lane: &Lane,
+    command_id: Uuid,
+    version: u64,
+    repositories: &[&str],
+) {
+    let bytes = command_bytes(command_id, version, repositories).expect("a command");
+    let command = CommandEnvelope::from_json(&bytes).expect("a canonical command");
+    let request = command
+        .payload_as::<VaultBackupPolicyApplyRequested>()
+        .expect("the policy payload");
+    let database = &lane.fixture.database;
+    let last_applied = database
+        .last_applied_policy_version()
+        .await
+        .expect("version");
+    let governed = database
+        .targets_governed_before(POLICY_SOURCE, version)
+        .await
+        .expect("the governed targets");
+    let deliveries = deliveries_for_policy(command_id, &request.policy, last_applied, &governed)
+        .expect("the deliveries");
+    for incoming in deliveries {
+        let validated = validate_delivery(&incoming.delivery).expect("a valid delivery");
+        database
+            .ingest_delivery(
+                &incoming.provider,
+                &incoming.external_repository_id,
+                &incoming.source,
+                incoming.message_id,
+                &validated,
+            )
+            .await
+            .expect("the delivery committed before the crash");
+    }
+}
+
+async fn target_statuses(lane: &Lane) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "select external_repository_id, status from git_vault.targets
+         order by external_repository_id",
+    )
+    .fetch_all(lane.fixture.pool())
+    .await
+    .expect("the targets")
+}
+
+/// A crash after the ingests of a version leaves its deliveries committed and its targets
+/// unmoved. The redelivery must finish the job: the dropped repository ends excluded although its
+/// withdrawal was already written, the kept one stays governed, and exactly one acknowledgement
+/// answers the command.
+#[tokio::test]
+async fn a_redelivery_after_a_crash_still_excludes_the_dropped_repository() {
+    let lane = Lane::start().await;
+    lane.publish(Uuid::now_v7(), 1, &[REPO_A, REPO_B]).await;
+    wait_for_acknowledgements(&lane.context, 1, PATIENCE)
+        .await
+        .expect("version 1 is acknowledged");
+
+    let command_id = Uuid::now_v7();
+    ingest_without_converging(&lane, command_id, 2, &[REPO_A]).await;
+    assert_eq!(
+        target_statuses(&lane).await,
+        vec![
+            (REPO_A.to_owned(), "requested".to_owned()),
+            (REPO_B.to_owned(), "requested".to_owned()),
+        ],
+        "the crash left both targets unmoved"
+    );
+
+    let sequence = lane.publish(command_id, 2, &[REPO_A]).await;
+    let acknowledgements = wait_for_acknowledgements(&lane.context, 2, PATIENCE)
+        .await
+        .expect("version 2 is acknowledged");
+    wait_until_settled(&lane.context, sequence, PATIENCE)
+        .await
+        .expect("the redelivery is settled");
+    tokio::time::sleep(QUIET).await;
+
+    assert_eq!(
+        payload_of(&acknowledgements[1]).outcome,
+        PolicyOutcome::Accepted
+    );
+    assert_eq!(
+        target_statuses(&lane).await,
+        vec![
+            (REPO_A.to_owned(), "requested".to_owned()),
+            (REPO_B.to_owned(), "excluded".to_owned()),
+        ],
+        "the redelivery converged the withdrawn repository"
+    );
+    assert_eq!(
+        acknowledgement_count(&lane.context).await.expect("count"),
+        2,
+        "exactly one acknowledgement per command"
+    );
+    lane.finish().await;
+}
+
+/// The same crash window for a repository the next version brings back: it was excluded by an
+/// earlier version, its new revision is committed, and only the redelivery can reactivate it.
+#[tokio::test]
+async fn a_redelivery_after_a_crash_still_reactivates_a_readded_repository() {
+    let lane = Lane::start().await;
+    lane.publish(Uuid::now_v7(), 1, &[REPO_A, REPO_B]).await;
+    lane.publish(Uuid::now_v7(), 2, &[REPO_A]).await;
+    wait_for_acknowledgements(&lane.context, 2, PATIENCE)
+        .await
+        .expect("versions 1 and 2 are acknowledged");
+
+    let command_id = Uuid::now_v7();
+    ingest_without_converging(&lane, command_id, 3, &[REPO_A, REPO_B]).await;
+    assert_eq!(
+        target_statuses(&lane).await,
+        vec![
+            (REPO_A.to_owned(), "requested".to_owned()),
+            (REPO_B.to_owned(), "excluded".to_owned()),
+        ],
+        "the crash left the excluded repository excluded"
+    );
+
+    let sequence = lane.publish(command_id, 3, &[REPO_A, REPO_B]).await;
+    wait_for_acknowledgements(&lane.context, 3, PATIENCE)
+        .await
+        .expect("version 3 is acknowledged");
+    wait_until_settled(&lane.context, sequence, PATIENCE)
+        .await
+        .expect("the redelivery is settled");
+    tokio::time::sleep(QUIET).await;
+
+    assert_eq!(
+        target_statuses(&lane).await,
+        vec![
+            (REPO_A.to_owned(), "requested".to_owned()),
+            (REPO_B.to_owned(), "requested".to_owned()),
+        ],
+        "the redelivery reactivated the re-added repository"
+    );
+    assert_eq!(
+        acknowledgement_count(&lane.context).await.expect("count"),
+        3,
+        "exactly one acknowledgement per command"
     );
     lane.finish().await;
 }
