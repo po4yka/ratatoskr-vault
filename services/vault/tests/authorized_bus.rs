@@ -188,7 +188,7 @@ async fn the_vault_identity_does_its_job_and_nothing_else() {
     let answer = acknowledgement_envelope(
         &CommandEnvelope::from_json(&command).expect("the command parses"),
         Uuid::now_v7(),
-        WireTimestamp::now(),
+        WireTimestamp::parse("2026-08-20T09:00:05Z").expect("a canonical timestamp"),
         &PolicyDecision::for_version(1, 0),
     )
     .expect("an acknowledgement")
