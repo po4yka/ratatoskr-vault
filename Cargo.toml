@@ -53,6 +53,14 @@ tokio      = { version = "1.46", features = ["rt-multi-thread", "macros", "signa
 axum       = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
 http       = "1.3"
 
+# ---- message bus ----
+# The policy lane's NATS client. Only the pieces it uses: the ring TLS provider (the same crypto
+# stack as everything else here, no aws-lc-sys), JetStream, and nkey authentication. Same feature
+# set as the other Ratatoskr services that consume a fixed durable.
+async-nats = { version = "0.50.0", default-features = false, features = ["ring", "jetstream", "nkeys"] }
+# Key generation for the authorization-enabled broker test only; async-nats already links it.
+nkeys = "0.4"
+
 # ---- off-host object storage ----
 # Apache's provider-neutral client gives Vault one reviewed S3-compatible implementation. Only
 # S3, reqwest/rustls transport, and ring signing are enabled: no provider SDK, filesystem backend,
@@ -83,8 +91,10 @@ metrics                        = "0.24"
 metrics-exporter-prometheus    = { version = "0.17", default-features = false }
 
 # ---- identifiers ----
-# v7 for internally minted identity; the database stores the same bytes.
-uuid = { version = "1.11", features = ["v7", "serde"] }
+# v7 for internally minted identity; the database stores the same bytes. v5 for the policy feed:
+# a delivery message id is derived from the command id and the repository reference, so a
+# redelivered command reproduces the same ids and the inbox dedups it (XR-021 S09).
+uuid = { version = "1.11", features = ["v5", "v7", "serde"] }
 
 # ---- serialization and errors ----
 serde      = { version = "1.0", features = ["derive"] }

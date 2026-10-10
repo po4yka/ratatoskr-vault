@@ -11,7 +11,16 @@ repository.workspace   = true
 name = "ratatoskr-vault"
 path = "src/main.rs"
 
+[features]
+# Scaffolding for the bus tests (a spawned `nats-server`, topology provisioning, command
+# builders). Never compiled into the deployable; the integration tests enable it through the
+# self dev-dependency below.
+test-support = ["dep:nkeys"]
+
 [dependencies]
+ratatoskr-backup-contracts.workspace = true
+ratatoskr-event-envelope.workspace   = true
+ratatoskr-identifiers.workspace      = true
 ratatoskr-vault-core.workspace     = true
 ratatoskr-vault-blobstore.workspace = true
 ratatoskr-vault-gitrunner.workspace = true
@@ -24,8 +33,12 @@ uuid.workspace                     = true
 serde_json.workspace               = true
 thiserror.workspace                = true
 sha2.workspace                     = true
+async-nats.workspace               = true
+futures-util.workspace             = true
+nkeys                              = { workspace = true, optional = true }
 
 [dev-dependencies]
+ratatoskr-vault = { path = ".", features = ["test-support"] }
 axum.workspace = true
 ratatoskr-vault-persistence = { workspace = true, features = ["test-support"] }
 secrecy.workspace = true
