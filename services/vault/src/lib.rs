@@ -4,9 +4,12 @@
 
 pub mod lfs_collection;
 pub mod mirror_lifecycle;
+pub mod policy_bus;
 pub mod reconcile;
 pub mod replication;
 pub mod restore_verification;
 pub mod retention;
 pub mod snapshot_lifecycle;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod wiki;
