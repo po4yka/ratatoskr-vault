@@ -329,13 +329,24 @@ async fn the_shipped_lane_runs_under_the_vault_identity() {
         "the relay publishes on the one permitted subject"
     );
 
-    let published: i64 = sqlx::query_scalar(
-        "select count(*) from git_vault.outbox
-         where event_type = 'vault.backup_policy.acknowledged.v1' and published_at is not null",
-    )
-    .fetch_one(fixture.pool())
-    .await
-    .expect("the published count");
+    // The broker stores the acknowledgement before its `PubAck` returns, and the relay marks the
+    // row only after that `PubAck`, so the stream can hold the event a moment before the row is
+    // marked. Wait for the mark instead of reading it once.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let published = loop {
+        let published: i64 = sqlx::query_scalar(
+            "select count(*) from git_vault.outbox
+             where event_type = 'vault.backup_policy.acknowledged.v1'
+               and published_at is not null",
+        )
+        .fetch_one(fixture.pool())
+        .await
+        .expect("the published count");
+        if published > 0 || Instant::now() >= deadline {
+            break published;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(published, 1, "the PubAck reached the relay");
     let checks = health.checks();
     let bus = checks
