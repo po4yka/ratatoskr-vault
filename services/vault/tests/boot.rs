@@ -249,7 +249,7 @@ fn role_file() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/postgres/role.sql")
 }
 
-/// R3-11: the example names the one shared database, `ratatoskr`, on the target's PostgreSQL port,
+/// R3-11: the example names the one shared database, `ratatoskr`, on the target's `PostgreSQL` port,
 /// as the role `ratatoskr_vault`, and a checked-in file creates that role with exactly the grant
 /// the schema needs (`connect` and `create` on the database: `schema.sql` creates `git_vault`).
 /// The example loads through the service's own configuration loader, so the URL is what the
