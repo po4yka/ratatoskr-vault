@@ -75,7 +75,7 @@ pub fn without_acknowledgement_permission(fragment: &str) -> String {
     kept.join("\n")
 }
 
-/// Connects with an nkey seed.
+/// Connects with an nkey seed and the default options (the administrator, which stands in for Edge).
 ///
 /// # Panics
 ///
@@ -90,6 +90,24 @@ pub async fn connect(url: &str, seed: &str, request_timeout: Duration) -> async_
         .connect(url)
         .await
         .expect("the nkey identity connects")
+}
+
+/// Connects as the Vault identity, through the options the shipped lane connects with
+/// ([`crate::policy_bus::connect_options`]), so what passes here is what the process does.
+///
+/// # Panics
+///
+/// When the identity does not connect.
+#[expect(
+    clippy::expect_used,
+    reason = "test-only scaffolding: a refused identity is a test failure"
+)]
+pub async fn connect_vault(url: &str, seed: &str, request_timeout: Duration) -> async_nats::Client {
+    crate::policy_bus::connect_options(Some(seed))
+        .request_timeout(Some(request_timeout))
+        .connect(url)
+        .await
+        .expect("the Vault identity connects")
 }
 
 /// A broker that enforces a Vault stanza, with the seeds of the two identities it knows.

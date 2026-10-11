@@ -18,6 +18,25 @@ pub(super) struct Connection {
     pub(super) lost: watch::Receiver<bool>,
 }
 
+/// The inbox prefix of the Vault identity (XR-021 CONTRACTS.md section R3-01). The VAULT stanza of
+/// the reviewed ACL lets the identity subscribe to `_INBOX_vault.>` only, so every `JetStream` reply
+/// must arrive on this prefix; the shared `_INBOX.>` namespace is not permitted to it.
+const INBOX_PREFIX: &str = "_INBOX_vault";
+
+/// The connection options of the lane: the nkey identity when a seed is given, and the inbox
+/// prefix in every case.
+///
+/// One function for the shipped lane and for the tests that run the Vault identity against a
+/// broker enforcing its ACL, so a test that passes proves the options the process uses.
+#[must_use]
+pub fn connect_options(seed: Option<&str>) -> ConnectOptions {
+    let options = match seed {
+        Some(seed) => ConnectOptions::with_nkey(seed.trim().to_owned()),
+        None => ConnectOptions::new(),
+    };
+    options.custom_inbox_prefix(INBOX_PREFIX)
+}
+
 /// Connects with the configured identity.
 ///
 /// The client reconnects on its own, and that is deliberately not relied on: the first disconnect
@@ -27,15 +46,15 @@ pub(super) async fn connect(
     bus: &BusConfig,
     health: &Arc<RuntimeState>,
 ) -> Result<Connection, LaneError> {
-    let options = match bus.nkey_seed_path.as_ref() {
-        Some(path) => {
-            let seed = tokio::fs::read_to_string(path)
+    let seed = match bus.nkey_seed_path.as_ref() {
+        Some(path) => Some(
+            tokio::fs::read_to_string(path)
                 .await
-                .map_err(|_| LaneError::Seed)?;
-            ConnectOptions::with_nkey(seed.trim().to_owned())
-        }
-        None => ConnectOptions::new(),
+                .map_err(|_| LaneError::Seed)?,
+        ),
+        None => None,
     };
+    let options = connect_options(seed.as_deref());
 
     let (sender, lost) = watch::channel(false);
     let health = Arc::clone(health);

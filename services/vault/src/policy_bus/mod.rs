@@ -14,6 +14,8 @@ mod consumer;
 mod handler;
 mod relay;
 
+pub use connection::connect_options;
+
 use std::future::Future;
 use std::sync::Arc;
 

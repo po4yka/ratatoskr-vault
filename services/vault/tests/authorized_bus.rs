@@ -27,7 +27,7 @@ use ratatoskr_identifiers::WireTimestamp;
 use ratatoskr_vault::policy_bus::{
     self, ACKNOWLEDGEMENT_SUBJECT, COMMANDS_STREAM, DURABLE, EVENTS_STREAM,
 };
-use ratatoskr_vault::test_support::authorized::{Authorized, connect, fragment};
+use ratatoskr_vault::test_support::authorized::{Authorized, connect, connect_vault, fragment};
 use ratatoskr_vault::test_support::{
     Broker, command_bytes, provision_topology, publish_command, wait_for_acknowledgements,
     wait_until_settled,
@@ -57,7 +57,7 @@ const EXPECTED_STANZA: &str = r#"
                 "$JS.ACK.ratatoskr_commands.ratatoskr_vault_backup_policy.>",
             ]
         }
-        subscribe: { allow: ["_INBOX.>"] }
+        subscribe: { allow: ["_INBOX_vault.>"] }
     }
 }
 "#;
@@ -128,7 +128,7 @@ async fn the_vault_identity_does_its_job_and_nothing_else() {
     .expect("its canonical form");
 
     // Vault's side, with only the fragment's permissions.
-    let vault_client = connect(&broker.url(), &vault_seed, REQUEST_TIMEOUT).await;
+    let vault_client = connect_vault(&broker.url(), &vault_seed, REQUEST_TIMEOUT).await;
     let context = jetstream::context::ContextBuilder::new()
         .timeout(REQUEST_TIMEOUT)
         .build(vault_client.clone());
@@ -200,6 +200,77 @@ async fn the_vault_identity_does_its_job_and_nothing_else() {
         )
         .await,
         "the server log must record the foreign CONSUMER.INFO\n{}",
+        broker.log_text()
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// R3-01: the VAULT stanza lets the identity subscribe to `_INBOX_vault.>` only, so the lane's
+/// connection must ask for its replies on that prefix. With the options of the shipped lane the
+/// identity verifies its durable, pulls the command, and publishes its acknowledgement with a
+/// `PubAck`; each of those is a request whose reply is delivered on the inbox. Without the prefix
+/// the first request times out because the reply subject is outside the subscription.
+#[tokio::test]
+async fn the_policy_lane_completes_jetstream_requests_under_its_inbox_prefix() {
+    let Authorized {
+        broker,
+        directory,
+        admin_seed,
+        vault_seed,
+        ..
+    } = Authorized::shipped(Path::new(env!("CARGO_TARGET_TMPDIR")));
+    let admin_client = connect(&broker.url(), &admin_seed, REQUEST_TIMEOUT).await;
+    let admin = provision_topology(&admin_client).await.expect("topology");
+    let command = command_bytes(Uuid::now_v7(), 1, &[REPO_A]).expect("a command");
+    publish_command(&admin, command.clone(), "inbox-prefix-test")
+        .await
+        .expect("the command is stored");
+    let answer = acknowledgement_envelope(
+        &CommandEnvelope::from_json(&command).expect("the command parses"),
+        Uuid::now_v7(),
+        WireTimestamp::parse("2026-08-20T09:00:05Z").expect("a canonical timestamp"),
+        &PolicyDecision::for_version(1, 0),
+    )
+    .expect("an acknowledgement")
+    .to_canonical_json()
+    .expect("its canonical form");
+
+    let vault_client = connect_vault(&broker.url(), &vault_seed, REQUEST_TIMEOUT).await;
+    let context = jetstream::context::ContextBuilder::new()
+        .timeout(REQUEST_TIMEOUT)
+        .build(vault_client);
+    let durable: consumer::PullConsumer = context
+        .get_consumer_from_stream(DURABLE, COMMANDS_STREAM)
+        .await
+        .expect("CONSUMER.INFO is answered on the inbox prefix");
+    let mut messages = durable
+        .fetch()
+        .max_messages(1)
+        .expires(Duration::from_secs(5))
+        .messages()
+        .await
+        .expect("CONSUMER.MSG.NEXT is accepted");
+    let message = futures_util::StreamExt::next(&mut messages)
+        .await
+        .expect("a command is delivered on the inbox prefix")
+        .expect("the delivery is well formed");
+    message
+        .double_ack()
+        .await
+        .expect("the acknowledgement of the delivery is answered on the inbox prefix");
+    let published = context
+        .publish(ACKNOWLEDGEMENT_SUBJECT, answer.into())
+        .await
+        .expect("the acknowledgement subject is publishable")
+        .await
+        .expect("the PubAck is delivered on the inbox prefix");
+    assert!(
+        published.sequence > 0,
+        "the broker stored the acknowledgement"
+    );
+    assert!(
+        !broker.log_text().contains("Violation"),
+        "nothing the lane does may touch a subject outside its permissions\n{}",
         broker.log_text()
     );
     let _ = std::fs::remove_dir_all(&directory);
