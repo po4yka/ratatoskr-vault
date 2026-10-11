@@ -30,6 +30,21 @@ pub struct DueOutboxRow {
 /// One due row straight from the query; positional order must match the SELECT.
 type DueRow = (Uuid, String, serde_json::Value, i32);
 
+/// What the relay's health decision reads about the unpublished acknowledgements (XR-021
+/// CONTRACTS.md section R2-03).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PublishBacklog {
+    /// Failed publishes recorded on the oldest unpublished acknowledgement.
+    pub oldest_attempt_count: u32,
+    /// How long the oldest unpublished acknowledgement has waited, by the database clock.
+    pub oldest_age: Duration,
+    /// Whether any unpublished acknowledgement has a recorded failed publish.
+    pub any_failed: bool,
+}
+
+/// The backlog summary straight from the query; positional order must match the SELECT.
+type BacklogRow = (Option<i32>, Option<f64>, bool);
+
 impl Database {
     /// The acknowledgement rows due for publication, oldest first, at most `limit`.
     ///
@@ -108,5 +123,37 @@ impl Database {
         .await
         .map(|_| ())
         .map_err(|error| classify_status_update_failure(&error))
+    }
+
+    /// A summary of the unpublished acknowledgements, or `None` when there are none. Rows that
+    /// are backed off count: the summary describes the backlog, not the due batch.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::StorageFailed`] for infrastructure failures, logged.
+    pub async fn publish_backlog(&self) -> Result<Option<PublishBacklog>, VaultError> {
+        let row: Option<BacklogRow> = sqlx::query_as(
+            "select
+                 (select attempt_count from git_vault.outbox
+                   where event_type = $1 and published_at is null
+                   order by created_at, event_id limit 1),
+                 (select extract(epoch from now() - created_at)::float8 from git_vault.outbox
+                   where event_type = $1 and published_at is null
+                   order by created_at, event_id limit 1),
+                 exists (select 1 from git_vault.outbox
+                          where event_type = $1 and published_at is null and attempt_count > 0)",
+        )
+        .bind(ACKNOWLEDGEMENT_EVENT_TYPE)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| classify_status_update_failure(&error))?;
+        Ok(row.and_then(|(attempts, age, any_failed)| {
+            // The scalar subqueries are null together exactly when no row is unpublished.
+            attempts.zip(age).map(|(attempts, age)| PublishBacklog {
+                oldest_attempt_count: u32::try_from(attempts).unwrap_or(0),
+                oldest_age: Duration::from_secs_f64(age.max(0.0)),
+                any_failed,
+            })
+        }))
     }
 }

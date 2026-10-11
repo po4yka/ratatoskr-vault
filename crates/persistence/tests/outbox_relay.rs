@@ -174,3 +174,87 @@ async fn an_outbox_event_type_outside_the_closed_list_is_refused() {
 
     fixture.cleanup().await.expect("cleanup");
 }
+
+/// The relay's health decision reads the backlog, not the due batch: the oldest unpublished
+/// acknowledgement with its failed attempts and age, and whether any unpublished row has failed.
+/// A published row is not part of it, and a backed-off row still is (R2-03).
+#[tokio::test]
+async fn the_publish_backlog_reports_the_oldest_row_and_whether_any_row_failed() {
+    let fixture = TestDatabase::create().await.expect("a database");
+    let database = &fixture.database;
+    assert_eq!(
+        database.publish_backlog().await.expect("a backlog"),
+        None,
+        "no unpublished acknowledgement is no backlog"
+    );
+
+    let first = acknowledge(&fixture, 1).await;
+    let second = acknowledge(&fixture, 2).await;
+    let fresh = database
+        .publish_backlog()
+        .await
+        .expect("a backlog")
+        .expect("two unpublished rows");
+    assert_eq!(fresh.oldest_attempt_count, 0);
+    assert!(fresh.oldest_age < Duration::from_mins(1));
+    assert!(!fresh.any_failed);
+
+    // A failure on the younger row marks the backlog failed without changing the oldest row.
+    database
+        .record_publish_failure(second, "publish_unacknowledged", Duration::from_hours(1))
+        .await
+        .expect("a recorded failure");
+    let behind = database
+        .publish_backlog()
+        .await
+        .expect("a backlog")
+        .expect("rows");
+    assert_eq!(behind.oldest_attempt_count, 0);
+    assert!(
+        behind.any_failed,
+        "a backed-off failing row is still in the backlog"
+    );
+
+    // Three failures on the oldest row, and an age beyond the five minute mark.
+    for _ in 0..3 {
+        database
+            .record_publish_failure(first, "publish_unacknowledged", Duration::from_hours(1))
+            .await
+            .expect("a recorded failure");
+    }
+    sqlx::query(
+        "update git_vault.outbox set created_at = now() - interval '301 seconds'
+         where event_id = $1",
+    )
+    .bind(first)
+    .execute(fixture.pool())
+    .await
+    .expect("an aged row");
+    let stuck = database
+        .publish_backlog()
+        .await
+        .expect("a backlog")
+        .expect("rows");
+    assert_eq!(stuck.oldest_attempt_count, 3);
+    assert!(stuck.oldest_age >= Duration::from_mins(5));
+    assert!(stuck.any_failed);
+
+    // Publishing the oldest row makes the next one the oldest; publishing both empties it.
+    database
+        .mark_outbox_published(first)
+        .await
+        .expect("published");
+    let rest = database
+        .publish_backlog()
+        .await
+        .expect("a backlog")
+        .expect("one row");
+    assert_eq!(rest.oldest_attempt_count, 1);
+    database
+        .mark_outbox_published(second)
+        .await
+        .expect("published");
+    assert_eq!(database.publish_backlog().await.expect("a backlog"), None);
+
+    fixture.cleanup().await.expect("cleanup");
+}

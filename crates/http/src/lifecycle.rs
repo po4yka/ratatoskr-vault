@@ -18,6 +18,13 @@ const BUS_UP: u8 = 1;
 /// The bus is configured and not connected.
 const BUS_DOWN: u8 = 2;
 
+/// The relay has not reported: no bus is configured, or the lane has not started.
+const PUBLISH_ABSENT: u8 = 0;
+/// The relay's last pass left no stuck acknowledgement.
+const PUBLISH_HEALTHY: u8 = 1;
+/// The relay is running but an acknowledgement is stuck behind refused publishes.
+const PUBLISH_FAILING: u8 = 2;
+
 /// The facts readiness is computed from.
 ///
 /// Shared by the admin router, which reads it, and the shutdown sequence, which writes it.
@@ -33,6 +40,10 @@ pub struct RuntimeState {
     /// The message bus: 0 not configured, 1 connected, 2 not connected. Three states for the same
     /// reason as the database.
     bus: AtomicU8,
+    /// Whether the relay can publish what it owes: 0 not reported, 1 healthy, 2 failing. A relay
+    /// that keeps running but cannot publish is not a healthy publisher (XR-021 CONTRACTS.md
+    /// section R2-03), and it never stops the process; this fact only flips readiness.
+    bus_publish: AtomicU8,
 }
 
 impl RuntimeState {
@@ -44,6 +55,7 @@ impl RuntimeState {
             draining: AtomicBool::new(false),
             database: AtomicU8::new(DATABASE_ABSENT),
             bus: AtomicU8::new(BUS_ABSENT),
+            bus_publish: AtomicU8::new(PUBLISH_ABSENT),
         };
         state.publish_readiness();
         state
@@ -97,6 +109,29 @@ impl RuntimeState {
         }
     }
 
+    /// Record whether the relay can publish. Called by the policy lane when it starts and by the
+    /// relay after each pass.
+    pub fn set_bus_publish_healthy(&self, healthy: bool) {
+        self.bus_publish.store(
+            if healthy {
+                PUBLISH_HEALTHY
+            } else {
+                PUBLISH_FAILING
+            },
+            Ordering::Release,
+        );
+        self.publish_readiness();
+    }
+
+    /// Whether the relay can publish, or `None` when it has not reported.
+    #[must_use]
+    pub fn bus_publish_healthy(&self) -> Option<bool> {
+        match self.bus_publish.load(Ordering::Acquire) {
+            PUBLISH_ABSENT => None,
+            state => Some(state == PUBLISH_HEALTHY),
+        }
+    }
+
     /// A shutdown signal arrived. Readiness fails immediately; the listeners stay open.
     pub fn begin_draining(&self) {
         self.draining.store(true, Ordering::Release);
@@ -129,9 +164,22 @@ impl RuntimeState {
         // for something that does not exist is the readiness equivalent of an always-zero metric.
         // The declaration order above is alphabetical by variant, so inserting at the front keeps
         // the body stable without a sort.
-        for (name, reported) in [
-            (CheckName::Database, self.database_reachable()),
-            (CheckName::Bus, self.bus_connected()),
+        for (name, reported, reason) in [
+            (
+                CheckName::Database,
+                self.database_reachable(),
+                CheckReason::DependencyUnavailable,
+            ),
+            (
+                CheckName::BusPublish,
+                self.bus_publish_healthy(),
+                CheckReason::PublishFailing,
+            ),
+            (
+                CheckName::Bus,
+                self.bus_connected(),
+                CheckReason::DependencyUnavailable,
+            ),
         ] {
             if let Some(up) = reported {
                 checks.insert(
@@ -139,7 +187,7 @@ impl RuntimeState {
                     Check {
                         name,
                         state: CheckState::from_pass(up),
-                        reason: (!up).then_some(CheckReason::DependencyUnavailable),
+                        reason: (!up).then_some(reason),
                     },
                 );
             }
@@ -190,6 +238,8 @@ pub enum CheckName {
     /// The message bus is connected and its consumer is verified. Present only when one is
     /// configured.
     Bus,
+    /// The relay can publish what it owes. Present only when a bus is configured.
+    BusPublish,
     /// The database answers. Present only when one is configured.
     Database,
     /// No shutdown signal has arrived.
@@ -225,6 +275,8 @@ pub enum CheckReason {
     StartupIncomplete,
     /// A shutdown signal arrived and this instance is draining.
     ShutdownRequested,
-    /// The last probe of the database did not answer.
+    /// The last probe of the database did not answer, or the bus is not connected.
     DependencyUnavailable,
+    /// The relay's publishes are refused and an acknowledgement is stuck behind them.
+    PublishFailing,
 }

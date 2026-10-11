@@ -38,6 +38,34 @@ pub const VAULT_RETENTION_REFUSALS_TOTAL: &str = "vault_retention_refusals_total
 pub const VAULT_RETENTION_STAGE_ATTEMPTS_TOTAL: &str = "vault_retention_stage_attempts_total";
 /// End-to-end duration of one terminal deletion stage.
 pub const VAULT_RETENTION_STAGE_DURATION_SECONDS: &str = "vault_retention_stage_duration_seconds";
+/// Outbox rows the relay attempted to publish, by closed outcome.
+pub const VAULT_OUTBOX_PUBLICATIONS_TOTAL: &str = "vault_outbox_publications_total";
+
+/// Closed outcome of one relay publish attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxPublicationOutcome {
+    /// The broker confirmed the publish.
+    Published,
+    /// The broker did not confirm the publish; the row stays and backs off.
+    Failed,
+}
+
+impl OutboxPublicationOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Counts one relay publish attempt. The outcome is the only label: no event id, subject or error
+/// text can reach a metric.
+pub fn record_outbox_publication(outcome: OutboxPublicationOutcome) {
+    ::metrics::counter!(VAULT_OUTBOX_PUBLICATIONS_TOTAL,
+        "outcome" => outcome.as_str().to_owned())
+    .increment(1);
+}
 
 /// Closed retention evaluation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +467,25 @@ pub fn record_last_verification_age(target_id: &str, age: std::time::Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outbox_publication_is_counted_by_outcome() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        ::metrics::with_local_recorder(&recorder, || {
+            record_outbox_publication(OutboxPublicationOutcome::Published);
+            record_outbox_publication(OutboxPublicationOutcome::Failed);
+            record_outbox_publication(OutboxPublicationOutcome::Failed);
+        });
+        let rendered = recorder.handle().render();
+        assert!(
+            rendered.contains("vault_outbox_publications_total{outcome=\"published\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("vault_outbox_publications_total{outcome=\"failed\"} 2"),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn replication_diagnostics_use_closed_fields_and_never_render_secrets() {

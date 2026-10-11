@@ -17,7 +17,7 @@
     reason = "assertions in a test binary"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,7 @@ use ratatoskr_identifiers::WireTimestamp;
 use ratatoskr_vault::policy_bus::{
     self, ACKNOWLEDGEMENT_SUBJECT, COMMANDS_STREAM, DURABLE, EVENTS_STREAM,
 };
+use ratatoskr_vault::test_support::authorized::{Authorized, connect, fragment};
 use ratatoskr_vault::test_support::{
     Broker, command_bytes, provision_topology, publish_command, wait_for_acknowledgements,
     wait_until_settled,
@@ -61,20 +62,6 @@ const EXPECTED_STANZA: &str = r#"
 }
 "#;
 
-fn fragment_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/nats/identity.conf")
-}
-
-fn fragment() -> String {
-    let path = fragment_path();
-    assert!(
-        path.is_file(),
-        "{} is missing: Vault must carry its NATS identity fragment (S03)",
-        path.display()
-    );
-    std::fs::read_to_string(&path).expect("the fragment is readable")
-}
-
 /// Drops comment lines and trailing comments, blanks the nkey token, and removes whitespace.
 fn normalise(text: &str) -> String {
     text.lines()
@@ -92,33 +79,10 @@ fn normalise(text: &str) -> String {
         .collect()
 }
 
-/// Replaces the placeholder with a real public key so the server accepts the identity.
-fn with_public_key(fragment: &str, public_key: &str) -> String {
-    fragment
-        .lines()
-        .map(|line| {
-            if line.trim_start().starts_with("nkey:") {
-                format!("    nkey: {public_key}")
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// The fragment equals the VAULT stanza of S03, so the deployed ACL and this file cannot drift.
 #[test]
 fn the_fragment_is_the_vault_stanza_of_the_reviewed_acl() {
     assert_eq!(normalise(&fragment()), normalise(EXPECTED_STANZA));
-}
-
-async fn connect(url: &str, seed: &str) -> async_nats::Client {
-    async_nats::ConnectOptions::with_nkey(seed.to_owned())
-        .request_timeout(Some(REQUEST_TIMEOUT))
-        .connect(url)
-        .await
-        .expect("the nkey identity connects")
 }
 
 /// Polls the server log until it contains `needle`.
@@ -133,39 +97,6 @@ async fn log_shows(broker: &Broker, needle: &str) -> bool {
     false
 }
 
-/// An authorization-enabled broker built from the shipped fragment, with the seeds of its two
-/// identities: an administrator that stands in for Edge, and Vault.
-struct Authorized {
-    broker: Broker,
-    directory: PathBuf,
-    admin_seed: String,
-    vault_seed: String,
-}
-
-fn authorized_broker() -> Authorized {
-    let administrator = nkeys::KeyPair::new_user();
-    let vault = nkeys::KeyPair::new_user();
-    let admin_seed = administrator.seed().expect("an admin seed");
-    let vault_seed = vault.seed().expect("a vault seed");
-    let stanza = with_public_key(&fragment(), &vault.public_key());
-    let authorization = format!(
-        "authorization {{\n  users: [\n    {{ nkey: {admin}\n      permissions: {{\n        \
-         publish: {{ allow: [\">\"] }}\n        subscribe: {{ allow: [\">\"] }}\n      }} }},\n\
-         {stanza}\n  ]\n}}\n",
-        admin = administrator.public_key(),
-    );
-    let directory =
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("authz-{}", Uuid::now_v7()));
-    std::fs::create_dir_all(&directory).expect("a scratch directory");
-    let broker = Broker::spawn(&directory, &authorization).expect("an authorizing broker");
-    Authorized {
-        broker,
-        directory,
-        admin_seed,
-        vault_seed,
-    }
-}
-
 /// The Vault identity fetches and acknowledges a policy command and publishes its acknowledgement
 /// through a broker that enforces the fragment; any other `evt.*` publish and `CONSUMER.INFO` on a
 /// foreign durable are refused.
@@ -176,10 +107,11 @@ async fn the_vault_identity_does_its_job_and_nothing_else() {
         directory,
         admin_seed,
         vault_seed,
-    } = authorized_broker();
+        ..
+    } = Authorized::shipped(Path::new(env!("CARGO_TARGET_TMPDIR")));
 
     // Edge's side: provision the topology and publish the command.
-    let admin_client = connect(&broker.url(), &admin_seed).await;
+    let admin_client = connect(&broker.url(), &admin_seed, REQUEST_TIMEOUT).await;
     let admin = provision_topology(&admin_client).await.expect("topology");
     let command = command_bytes(Uuid::now_v7(), 1, &[REPO_A]).expect("a command");
     let sequence = publish_command(&admin, command.clone(), "authorized-test")
@@ -196,7 +128,7 @@ async fn the_vault_identity_does_its_job_and_nothing_else() {
     .expect("its canonical form");
 
     // Vault's side, with only the fragment's permissions.
-    let vault_client = connect(&broker.url(), &vault_seed).await;
+    let vault_client = connect(&broker.url(), &vault_seed, REQUEST_TIMEOUT).await;
     let context = jetstream::context::ContextBuilder::new()
         .timeout(REQUEST_TIMEOUT)
         .build(vault_client.clone());
@@ -292,8 +224,9 @@ async fn the_shipped_lane_runs_under_the_vault_identity() {
         directory,
         admin_seed,
         vault_seed,
-    } = authorized_broker();
-    let admin_client = connect(&broker.url(), &admin_seed).await;
+        ..
+    } = Authorized::shipped(Path::new(env!("CARGO_TARGET_TMPDIR")));
+    let admin_client = connect(&broker.url(), &admin_seed, REQUEST_TIMEOUT).await;
     let admin = provision_topology(&admin_client).await.expect("topology");
 
     let seed_path = directory.join("vault.nkey");

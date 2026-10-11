@@ -13,6 +13,7 @@
     reason = "assertions in a test binary"
 )]
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,15 +24,19 @@ use ratatoskr_backup_contracts::{
 };
 use ratatoskr_event_envelope::CommandEnvelope;
 use ratatoskr_vault::policy_bus::{self, COMMANDS_STREAM, DURABLE};
+use ratatoskr_vault::test_support::authorized::{
+    Authorized, connect, fragment, without_acknowledgement_permission,
+};
 use ratatoskr_vault::test_support::{
-    StoredAcknowledgement, acknowledgement_count, command_bytes, nats_url, provision_topology,
-    publish_command, wait_for_acknowledgements, wait_until_settled,
+    StoredAcknowledgement, acknowledgement_count, claim_port, command_bytes, nats_url,
+    provision_topology, publish_command, wait_for_acknowledgements, wait_until_settled,
 };
 use ratatoskr_vault_core::config::BusConfig;
 use ratatoskr_vault_core::delivery::validate_delivery;
 use ratatoskr_vault_core::policy_feed::{POLICY_SOURCE, deliveries_for_policy};
-use ratatoskr_vault_http::{CheckName, CheckState, RuntimeState};
+use ratatoskr_vault_http::{CheckName, CheckState, RuntimeState, admin_router};
 use ratatoskr_vault_persistence::test_support::TestDatabase;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -574,4 +579,193 @@ async fn a_started_lane_reports_a_connected_bus() {
         .expect("a configured bus is a named readiness check");
     assert_eq!(bus.state, CheckState::Pass);
     lane.finish().await;
+}
+
+/// How long the three refused attempts of the publisher-health test may take: each one waits out
+/// the broker's five second publish acknowledgement timeout.
+const REFUSAL_PATIENCE: Duration = Duration::from_secs(90);
+
+/// One `GET /health/ready` over a real socket: the status code and the parsed body.
+async fn ready_probe(port: u16) -> (u16, serde_json::Value) {
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("the admin listener answers");
+    socket
+        .write_all(b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("the request is written");
+    let mut response = String::new();
+    socket
+        .read_to_string(&mut response)
+        .await
+        .expect("the response is read");
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("a status line");
+    let (_, body) = response.split_once("\r\n\r\n").expect("a body");
+    (status, serde_json::from_str(body).expect("a JSON body"))
+}
+
+/// The state the readiness body names for a check, when it reports one.
+fn check_state(body: &serde_json::Value, name: &str) -> Option<String> {
+    body["checks"]
+        .as_array()?
+        .iter()
+        .find(|check| check["name"] == name)
+        .and_then(|check| check["state"].as_str().map(str::to_owned))
+}
+
+/// Makes every unpublished outbox row due at once, so a test does not wait out the backoff.
+async fn make_due(fixture: &TestDatabase) {
+    sqlx::query(
+        "update git_vault.outbox set next_attempt_at = now() - interval '1 second'
+         where published_at is null",
+    )
+    .execute(fixture.pool())
+    .await
+    .expect("the attempt is made due");
+}
+
+/// The highest failed-attempt count among the acknowledgement rows.
+async fn failed_attempts(fixture: &TestDatabase) -> i32 {
+    sqlx::query_scalar(
+        "select coalesce(max(attempt_count), 0) from git_vault.outbox
+         where event_type = 'vault.backup_policy.acknowledged.v1'",
+    )
+    .fetch_one(fixture.pool())
+    .await
+    .expect("the attempt count")
+}
+
+/// Drives the refused acknowledgement through its failed attempts, asserting the check still
+/// passes below three, and returns the readiness body that first answered 503.
+async fn refuse_three_times(
+    fixture: &TestDatabase,
+    port: u16,
+    deadline: Instant,
+) -> serde_json::Value {
+    loop {
+        make_due(fixture).await;
+        let attempts = failed_attempts(fixture).await;
+        if attempts >= 3 {
+            break;
+        }
+        if attempts > 0 {
+            let (status, body) = ready_probe(port).await;
+            assert_eq!(
+                status, 200,
+                "{attempts} failed attempts are not unhealthy: {body}"
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "three attempts did not fail in time"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    loop {
+        let (status, body) = ready_probe(port).await;
+        if status == 503 {
+            return body;
+        }
+        assert!(Instant::now() < deadline, "readiness never flipped");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The relay keeps running while the broker refuses its acknowledgement subject, and readiness
+/// says so: after the third failed attempt `/health/ready` answers 503 with a failed `bus_publish`
+/// check beside a passing `bus` check, and once the subject is permitted again the next clean
+/// pass makes it answer 200 (XR-021 CONTRACTS.md section R2-03). Nothing stops the lane.
+#[tokio::test]
+async fn a_refused_acknowledgement_flips_readiness_until_it_publishes() {
+    let mut authorized = Authorized::spawn(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &without_acknowledgement_permission(&fragment()),
+    );
+    let url = authorized.broker.url();
+    let admin_client = connect(&url, &authorized.admin_seed, Duration::from_secs(5)).await;
+    let admin = provision_topology(&admin_client).await.expect("topology");
+    let seed_path = authorized.directory.join("vault.nkey");
+    std::fs::write(&seed_path, &authorized.vault_seed).expect("the seed file");
+    let fixture = TestDatabase::create().await.expect("a disposable database");
+    let health = Arc::new(RuntimeState::new());
+    let bus = BusConfig {
+        url: url.clone(),
+        nkey_seed_path: Some(seed_path),
+    };
+    let tasks = policy_bus::start(fixture.database.clone(), &bus, Arc::clone(&health))
+        .await
+        .expect("the lane starts: its consume permissions are intact");
+    health.mark_startup_complete();
+
+    let port = claim_port().expect("a port for the admin listener");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("the admin listener binds");
+    let server =
+        tokio::spawn(async move { axum::serve(listener, admin_router(health, String::new)).await });
+    let (status, body) = ready_probe(port).await;
+    assert_eq!(status, 200, "a lane that has not failed is ready: {body}");
+    assert_eq!(check_state(&body, "bus_publish").as_deref(), Some("pass"));
+
+    let sequence = publish_command(
+        &admin,
+        command_bytes(Uuid::now_v7(), 1, &[REPO_A]).expect("a command"),
+        "refused-acknowledgement",
+    )
+    .await
+    .expect("the command is stored");
+    wait_until_settled(&admin, sequence, PATIENCE)
+        .await
+        .expect("the command was decided");
+
+    // Every failed attempt is made due at once; below three the check must still pass.
+    let deadline = Instant::now() + REFUSAL_PATIENCE;
+    let flipped = refuse_three_times(&fixture, port, deadline).await;
+    assert_eq!(
+        check_state(&flipped, "bus_publish").as_deref(),
+        Some("fail"),
+        "{flipped}"
+    );
+    assert_eq!(
+        check_state(&flipped, "bus").as_deref(),
+        Some("pass"),
+        "{flipped}"
+    );
+    assert!(
+        tasks.iter().all(|task| !task.is_finished()),
+        "an unhealthy publisher never stops the lane"
+    );
+    assert!(
+        authorized.broker.log_text().contains("Publish Violation"),
+        "the broker log names the refusal\n{}",
+        authorized.broker.log_text()
+    );
+
+    // The subject is permitted again: the next clean pass publishes the row and readiness recovers.
+    authorized
+        .enforce(&fragment())
+        .expect("the stanza is restored");
+    loop {
+        make_due(&fixture).await;
+        if ready_probe(port).await.0 == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "readiness never recovered");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let published = wait_for_acknowledgements(&admin, 1, PATIENCE)
+        .await
+        .expect("the acknowledgement reached the broker");
+    assert_eq!(published.len(), 1);
+
+    server.abort();
+    for task in &tasks {
+        task.abort();
+    }
+    fixture.cleanup().await.expect("cleanup");
+    let _ = std::fs::remove_dir_all(&authorized.directory);
 }

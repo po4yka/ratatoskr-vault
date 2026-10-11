@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 pub use crate::lfs_collection::LfsCollectionTerminal;
 pub use crate::mirror_lifecycle::QuotaReservationOutcome;
-pub use crate::outbox_relay::{ACKNOWLEDGEMENT_EVENT_TYPE, DueOutboxRow};
+pub use crate::outbox_relay::{ACKNOWLEDGEMENT_EVENT_TYPE, DueOutboxRow, PublishBacklog};
 pub use crate::policy_lane::{PolicyCommandOutcome, PolicyDecisionRecord, RecordedDecision};
 pub use crate::replication::{
     DueReplicationUnit, ReplicaTargetObservation, StoredReplicaPlacement,

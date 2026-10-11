@@ -6,6 +6,8 @@
 //! authorization-enabled or disposable broker. Failures are plain strings: the callers are test
 //! binaries that assert on them.
 
+pub mod authorized;
+
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::File;
@@ -269,6 +271,7 @@ pub struct Broker {
     child: Child,
     port: u16,
     log: PathBuf,
+    directory: PathBuf,
 }
 
 /// Ports this process already handed out, so two tests of one binary never pick the same one.
@@ -320,6 +323,23 @@ pub fn claim_port() -> Result<u16, String> {
     Err("no free port in the configured range".to_owned())
 }
 
+/// Writes `nats.conf` for a server on `port` with `JetStream` stored under `directory`, followed
+/// by `extra`.
+fn write_configuration(directory: &Path, port: u16, extra: &str) -> Result<(), String> {
+    let store = directory.join("jetstream");
+    let mut configuration = String::new();
+    let _ = writeln!(configuration, "host: \"127.0.0.1\"");
+    let _ = writeln!(configuration, "port: {port}");
+    let _ = writeln!(
+        configuration,
+        "jetstream {{ store_dir: \"{}\" }}",
+        store.display()
+    );
+    configuration.push_str(extra);
+    std::fs::write(directory.join("nats.conf"), configuration)
+        .map_err(|error| format!("the broker configuration was not written: {error}"))
+}
+
 impl Broker {
     /// Starts `nats-server` with `JetStream` on a private loopback port, with `extra` appended to
     /// its configuration (an `authorization` block, for the tests that need one), and waits until
@@ -331,19 +351,7 @@ impl Broker {
     /// A description of why the server did not start.
     pub fn spawn(directory: &Path, extra: &str) -> Result<Self, String> {
         let port = claim_port()?;
-        let store = directory.join("jetstream");
-        let mut configuration = String::new();
-        let _ = writeln!(configuration, "host: \"127.0.0.1\"");
-        let _ = writeln!(configuration, "port: {port}");
-        let _ = writeln!(
-            configuration,
-            "jetstream {{ store_dir: \"{}\" }}",
-            store.display()
-        );
-        configuration.push_str(extra);
-        let configuration_path = directory.join("nats.conf");
-        std::fs::write(&configuration_path, configuration)
-            .map_err(|error| format!("the broker configuration was not written: {error}"))?;
+        write_configuration(directory, port, extra)?;
 
         let log = directory.join("nats.log");
         let output = File::create(&log)
@@ -353,12 +361,17 @@ impl Broker {
             .map_err(|error| format!("the broker log was not shared: {error}"))?;
         let child = Command::new("nats-server")
             .arg("-c")
-            .arg(&configuration_path)
+            .arg(directory.join("nats.conf"))
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(errors))
             .spawn()
             .map_err(|error| format!("nats-server did not start (is it installed?): {error}"))?;
-        let mut broker = Self { child, port, log };
+        let mut broker = Self {
+            child,
+            port,
+            log,
+            directory: directory.to_owned(),
+        };
         broker.wait_until_listening()?;
         Ok(broker)
     }
@@ -395,6 +408,26 @@ impl Broker {
     #[must_use]
     pub fn log_text(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Replaces the server's configuration with the same header and `extra`, and asks the running
+    /// server to reload it. The port, the stream store and the log stay the same.
+    ///
+    /// # Errors
+    ///
+    /// A description of why the configuration was not written or the signal not delivered.
+    pub fn reload(&mut self, extra: &str) -> Result<(), String> {
+        write_configuration(&self.directory, self.port, extra)?;
+        let status = Command::new("kill")
+            .arg("-HUP")
+            .arg(self.child.id().to_string())
+            .status()
+            .map_err(|error| format!("kill(1) did not run: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("the reload signal was not delivered ({status})"))
+        }
     }
 
     /// Closes the broker the way a crash does: the process is killed and reaped.

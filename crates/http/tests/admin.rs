@@ -209,6 +209,39 @@ async fn a_down_bus_is_a_failed_named_check_and_not_ready() {
     );
 }
 
+/// A relay that cannot publish is a failed `bus_publish` check beside a passing `bus` check, with
+/// its own closed reason, and the check is absent until the relay reports (R2-03).
+#[tokio::test]
+async fn a_failing_publisher_is_a_named_check_beside_a_connected_bus() {
+    let state = Arc::new(RuntimeState::new());
+    state.mark_startup_complete();
+    state.set_bus_connected(true);
+    let mut router = router_over(Arc::clone(&state));
+
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains("bus_publish"),
+        "the relay has not reported, so no publisher check may appear: {body}"
+    );
+
+    state.set_bus_publish_healthy(false);
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        body.contains("\"name\":\"bus_publish\",\"state\":\"fail\",\"reason\":\"publish_failing\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("\"name\":\"bus\",\"state\":\"pass\""),
+        "a connected bus still passes: {body}"
+    );
+
+    state.set_bus_publish_healthy(true);
+    let (status, body, _) = get(&mut router, "/health/ready").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 /// Readiness is the conjunction of its checks: a started process whose database stopped
 /// answering is not ready, instead of reporting `ready` beside a failed check.
 #[tokio::test]

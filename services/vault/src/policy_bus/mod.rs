@@ -5,7 +5,9 @@
 //! Two supervised tasks run beside the listeners. The consumer fetches the Edge-provisioned
 //! durable and decides each command; the relay publishes the acknowledgements those decisions
 //! left in the outbox, and nothing else. Either task returning before an orderly shutdown ends the
-//! process (S02 rule 5): the lane marks the bus check failed and the harness exits non-zero.
+//! process (S02 rule 5): the lane marks the bus check failed and the harness exits non-zero. A
+//! relay that keeps running but cannot publish only fails the `bus_publish` check (R2-03); it is
+//! never stopped for that.
 
 mod connection;
 mod consumer;
@@ -82,6 +84,7 @@ pub async fn start(
         .await
         .map_err(|error| error.to_string())?;
     health.set_bus_connected(true);
+    health.set_bus_publish_healthy(true);
 
     let wake = Arc::new(Notify::new());
     let consuming = tokio::spawn(supervised(
@@ -96,12 +99,13 @@ pub async fn start(
     ));
     let relaying = tokio::spawn(supervised(
         "relay",
-        health,
+        Arc::clone(&health),
         relay::run(
             database,
             async_nats::jetstream::new(connection.client),
             wake,
             connection.lost,
+            health,
         ),
     ));
     Ok(vec![consuming, relaying])
