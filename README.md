@@ -387,11 +387,9 @@ On the bus the service connects with the inbox prefix `_INBOX_vault`, and `deplo
 
 ## Workspace integration
 
-The planned `ratatoskr-workspace` topology will pin Vault with compatible desired-state contracts and
-GitHub Catalog changes. No workspace pin or GitHub-to-Vault integration profile exists yet. Future
-system integration tests must include real temporary repositories, corruption fixtures, off-host
-emulation, and verified restore scenarios. Vault remains independently operable if the public Edge
-service is unavailable.
+`ratatoskr-workspace` pins Vault (`workspace.toml`, `workspace.lock`) and declares its dependencies: the Contracts backup and blob-transfer contracts, Platform, and GitHub, whose desired backup policy command Vault consumes and whose policy acknowledgement Vault publishes. The workspace harness checks several facts about this repository on every run: the operator listener port 9570 against the port table, the byte equality of `deploy/nats/identity.conf` with the VAULT stanza of Platform's reviewed NATS ACL, the Edge-provisioned durable `ratatoskr_vault_backup_policy` against the durable table, and that Edge's route for the Vault domain API (port 8093) has no implementing listener. Vault serves only its operator listener today; the domain API behind that route does not exist.
+
+The evidence that the policy lane works is Vault's own tests: a real `nats-server` that enforces the VAULT stanza and a disposable PostgreSQL database run the shipped lane from command to published acknowledgement (`services/vault/tests/authorized_bus.rs`, `policy_bus.rs`, `policy_bus_process.rs`). No composed GitHub-to-Vault integration profile exists under the workspace `integration/` directory, and the native smoke of changeset XR-021 did not report a result for the GitHub flow, so the hop from a running GitHub service to a running Vault has not been exercised end to end. Future system integration tests must include real temporary repositories, corruption fixtures, off-host emulation, and verified restore scenarios. Vault runs without a bus, and then needs neither Edge nor GitHub; with a bus configured it needs Edge to have provisioned the durable before its first start.
 
 ## Project status
 
