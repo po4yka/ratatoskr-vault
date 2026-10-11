@@ -243,6 +243,59 @@ fn the_shipped_example_loads() {
     );
 }
 
+/// `deploy/postgres/role.sql`, next to the example: the file that creates the role the example
+/// names (XR-021 CONTRACTS.md section R3-11).
+fn role_file() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/postgres/role.sql")
+}
+
+/// R3-11: the example names the one shared database, `ratatoskr`, on the target's PostgreSQL port,
+/// as the role `ratatoskr_vault`, and a checked-in file creates that role with exactly the grant
+/// the schema needs (`connect` and `create` on the database: `schema.sql` creates `git_vault`).
+/// The example loads through the service's own configuration loader, so the URL is what the
+/// service would connect with; the role file is read as text, so the two cannot drift apart.
+#[test]
+fn the_example_names_the_shared_database_and_the_role_file_exists() {
+    let text = std::fs::read_to_string(shipped_example()).expect("the example is readable");
+    let loaded = load_example(&environment_file_pairs(&text));
+    let database = loaded.database.expect("the bus needs a database");
+    assert_eq!(
+        database.url.expose_secret(),
+        "postgres://ratatoskr_vault:CHANGE-ME@127.0.0.1:5432/ratatoskr",
+        "the example must name the shared database and the per-service role"
+    );
+
+    let path = role_file();
+    assert!(
+        path.is_file(),
+        "{} is missing: the role the example names must be created by a checked-in file (R3-11)",
+        path.display()
+    );
+    let sql = std::fs::read_to_string(&path).expect("the role file is readable");
+    let statements: Vec<String> = sql
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .map(|line| line.trim().to_lowercase())
+        .collect();
+    let has = |needle: &str| statements.iter().any(|line| line.contains(needle));
+    assert!(
+        has("create role ratatoskr_vault login"),
+        "the file creates the role"
+    );
+    assert!(
+        has("nosuperuser nocreatedb nocreaterole noreplication nobypassrls"),
+        "the role has no elevated attributes"
+    );
+    assert!(
+        has("grant connect, create on database ratatoskr to ratatoskr_vault"),
+        "the role may connect to the shared database and create its schema in it"
+    );
+    assert!(
+        has("revoke all on schema public from ratatoskr_vault"),
+        "the role gets nothing in the public schema"
+    );
+}
+
 /// The path of the workspace binary under test.
 ///
 /// `CARGO_BIN_EXE_*` is set for binaries of the package under test, but only after a build puts

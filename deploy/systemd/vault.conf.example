@@ -6,7 +6,8 @@
 RATATOSKR__ADMIN__BIND=127.0.0.1:9570
 
 # The policy lane writes to this database, so a bus requires it. SECRET: the URL carries the password.
-RATATOSKR__DATABASE__URL=postgres://vault:CHANGE-ME@127.0.0.1:5432/vault
+# The shared database `ratatoskr` and the role `ratatoskr_vault`, which deploy/postgres/role.sql creates (a PostgreSQL administrator runs it once, then sets the password with `\password ratatoskr_vault`). The service creates its own schema, `git_vault`, on the first start.
+RATATOSKR__DATABASE__URL=postgres://ratatoskr_vault:CHANGE-ME@127.0.0.1:5432/ratatoskr
 
 # The policy lane. Edge provisions the durable ratatoskr_vault_backup_policy; start Edge first.
 RATATOSKR__BUS__URL=nats://127.0.0.1:4222

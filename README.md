@@ -379,6 +379,12 @@ semantics, hostile fixtures, and rollout/rollback. Existing provider credentials
 The authoritative sequence is [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Items
 1–8 are implemented; items 9–10 remain planned.
 
+## Deployment
+
+Vault connects to the one database of the deployment target, `ratatoskr`, as its own role, `ratatoskr_vault`, and owns the schema `git_vault` in it. Provisioning order on the host: Platform's `deploy/postgres/01-database-and-roles.sql` creates the database; a PostgreSQL administrator then runs this repository's `deploy/postgres/role.sql` (it creates the role without a password and grants `connect` and `create` on `ratatoskr`; the password is set separately with `\password ratatoskr_vault`); `deploy/systemd/vault.conf.example` names the resulting URL, `postgres://ratatoskr_vault:CHANGE-ME@127.0.0.1:5432/ratatoskr`, and the nkey seed `/etc/ratatoskr/vault.nkey`. The first start applies `schema.sql` to the database because `git_vault` does not exist yet, and a later start finds the schema and leaves it alone. The `compose.yaml` of this repository, `.env.example` and the examples in `DEVELOPMENT.md` use their own development database `vault` with the role `vault`; that is a development convenience and not the deployment shape.
+
+On the bus the service connects with the inbox prefix `_INBOX_vault`, and `deploy/nats/identity.conf` (the copy of its stanza in the reviewed ACL) lets it subscribe to `_INBOX_vault.>` only. A Vault build and an ACL that disagree on the prefix cannot complete JetStream requests: the call times out, so NATS is reloaded and the services of one snapshot are deployed together.
+
 ## Workspace integration
 
 The planned `ratatoskr-workspace` topology will pin Vault with compatible desired-state contracts and
