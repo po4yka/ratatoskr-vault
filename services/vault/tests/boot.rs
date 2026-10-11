@@ -13,7 +13,11 @@
     reason = "assertions in a test binary"
 )]
 
+use figment::Figment;
+use figment::providers::Serialized;
+use ratatoskr_vault_core::config::{self, VaultConfig};
 use ratatoskr_vault_persistence::test_support::TestDatabase;
+use secrecy::ExposeSecret as _;
 use std::io::{Read, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -157,6 +161,85 @@ fn a_listener_that_cannot_bind_exits_one() {
     assert!(
         String::from_utf8_lossy(&refused.stdout).contains("the admin listener could not bind"),
         "the operator was told which listener failed",
+    );
+}
+
+/// The operator example the repository ships: a systemd `EnvironmentFile`.
+fn shipped_example() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/systemd/vault.conf.example")
+}
+
+/// The `KEY=value` lines of an `EnvironmentFile`: blank lines and `#` comments are skipped.
+fn environment_file_pairs(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("not a KEY=value line: {line}"));
+            (key.to_owned(), value.to_owned())
+        })
+        .collect()
+}
+
+/// The configuration the loader builds from the example's variables, layered over the defaults
+/// exactly as `RATATOSKR__A__B=value` layers over them: `A__B` becomes the key path `a.b`.
+fn load_example(pairs: &[(String, String)]) -> VaultConfig {
+    let mut figment = Figment::from(Serialized::defaults(VaultConfig::defaults()));
+    for (key, value) in pairs {
+        let path = key
+            .strip_prefix("RATATOSKR__")
+            .unwrap_or_else(|| panic!("{key} is not a RATATOSKR__ variable"))
+            .to_lowercase()
+            .replace("__", ".");
+        figment = figment.merge(Serialized::default(&path, value));
+    }
+    config::load_from(figment).expect("the shipped example must load and validate")
+}
+
+/// `deploy/systemd/vault.conf.example` is loadable and sets what the flow needs (XR-021
+/// CONTRACTS.md section R2-10): the operator address, the bus URL, the nkey seed path of the
+/// deployment target and a database URL placeholder. It loads through the service's own
+/// configuration loader, and again as the process environment of `check-config`, so a key the
+/// loader stops reading (an unknown key is a refusal) fails here instead of rotting in the file.
+#[test]
+fn the_shipped_example_loads() {
+    let path = shipped_example();
+    assert!(
+        path.is_file(),
+        "{} is missing: Vault must ship an operator example (R2-10)",
+        path.display()
+    );
+    let text = std::fs::read_to_string(&path).expect("the example is readable");
+    let pairs = environment_file_pairs(&text);
+
+    let loaded = load_example(&pairs);
+    assert_eq!(loaded.admin.bind.to_string(), "127.0.0.1:9570");
+    let bus = loaded.bus.expect("the example enables the bus");
+    assert_eq!(bus.url, "nats://127.0.0.1:4222");
+    assert_eq!(
+        bus.nkey_seed_path,
+        Some(PathBuf::from("/etc/ratatoskr/vault.nkey"))
+    );
+    let database = loaded.database.expect("the bus needs a database");
+    assert!(
+        database.url.expose_secret().contains("CHANGE-ME"),
+        "the database credential is a placeholder, never a real secret"
+    );
+
+    // The same variables as a process environment, through the binary's own loader.
+    let mut check = Command::new(built_binary());
+    check.arg("check-config").env_clear();
+    for (key, value) in &pairs {
+        check.env(key, value);
+    }
+    let output = check.output().expect("check-config must run");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "check-config rejected the shipped example\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

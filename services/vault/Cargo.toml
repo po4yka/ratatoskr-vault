@@ -40,6 +40,7 @@ nkeys                              = { workspace = true, optional = true }
 [dev-dependencies]
 ratatoskr-vault = { path = ".", features = ["test-support"] }
 axum.workspace = true
+figment.workspace = true
 ratatoskr-vault-persistence = { workspace = true, features = ["test-support"] }
 secrecy.workspace = true
 sqlx.workspace              = true

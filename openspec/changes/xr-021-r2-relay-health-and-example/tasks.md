@@ -11,5 +11,5 @@
 
 ## 2. Operator example (R2-10; configuration)
 
-- [ ] 2.1 Add `services/vault/tests/boot.rs::the_shipped_example_loads`, run it, and observe it fail because `deploy/systemd/vault.conf.example` is absent
-- [ ] 2.2 Add `deploy/systemd/vault.conf.example` and a `DEVELOPMENT.md` pointer; rerun the test and observe it pass
+- [x] 2.1 Add `services/vault/tests/boot.rs::the_shipped_example_loads`, run it, and observe it fail because `deploy/systemd/vault.conf.example` is absent
+- [x] 2.2 Add `deploy/systemd/vault.conf.example` and a `DEVELOPMENT.md` pointer; rerun the test and observe it pass

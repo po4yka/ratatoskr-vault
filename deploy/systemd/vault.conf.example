@@ -1,0 +1,16 @@
+# Operator example for ratatoskr-vault, a systemd EnvironmentFile (EnvironmentFile=/etc/ratatoskr/vault.conf).
+# Copy it to /etc/ratatoskr/vault.conf, replace every CHANGE-ME, and keep the file readable by the service user only.
+# `ratatoskr-vault check-config` validates it without starting anything (exit 0 valid, exit 78 invalid). The full variable table is .env.example; services/vault/tests/boot.rs loads this file, so it cannot name a key the service no longer reads.
+
+# Operator listener: /health/live, /health/ready, /metrics, /version. Host only; allocated in docs/DEPLOYMENT_TARGET.md.
+RATATOSKR__ADMIN__BIND=127.0.0.1:9570
+
+# The policy lane writes to this database, so a bus requires it. SECRET: the URL carries the password.
+RATATOSKR__DATABASE__URL=postgres://vault:CHANGE-ME@127.0.0.1:5432/vault
+
+# The policy lane. Edge provisions the durable ratatoskr_vault_backup_policy; start Edge first.
+RATATOSKR__BUS__URL=nats://127.0.0.1:4222
+# Absolute path of the nkey seed (SECRET, read at runtime, never logged). Required for tls://.
+RATATOSKR__BUS__NKEY_SEED_PATH=/etc/ratatoskr/vault.nkey
+
+RATATOSKR__TELEMETRY__LOG_FORMAT=json
